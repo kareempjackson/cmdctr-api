@@ -1,0 +1,76 @@
+generator client {
+    provider      = "prisma-client-js"
+    binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model User {
+    id                       String            @id @default(uuid())
+    email                    String            @unique
+    password                 String
+    name                     String?
+    role                     String?
+    onboarded                Boolean           @default(false)
+    verified                 Boolean           @default(false)
+    verificationToken        String?
+    verificationTokenExpires DateTime?
+    createdAt                DateTime          @default(now())
+    updatedAt                DateTime          @updatedAt
+    workspaces               Workspace[]
+    loginEvents              LoginEvent[]
+    WorkspaceMember          WorkspaceMember[]
+}
+
+model Workspace {
+    id        String            @id @default(uuid())
+    name      String
+    createdBy String
+    createdAt DateTime          @default(now())
+    members   WorkspaceMember[]
+    agents    Agent[]
+    creator   User              @relation(fields: [createdBy], references: [id])
+}
+
+model WorkspaceMember {
+    id          String    @id @default(uuid())
+    userId      String
+    workspaceId String
+    role        String
+    user        User      @relation(fields: [userId], references: [id])
+    workspace   Workspace @relation(fields: [workspaceId], references: [id])
+}
+
+model Agent {
+    id          String        @id @default(uuid())
+    name        String
+    purpose     String
+    config      Json
+    workspaceId String
+    createdAt   DateTime      @default(now())
+    workspace   Workspace     @relation(fields: [workspaceId], references: [id])
+    AgentMemory AgentMemory[]
+}
+
+model AgentMemory {
+    id        String   @id @default(uuid())
+    agentId   String
+    agent     Agent    @relation(fields: [agentId], references: [id])
+    input     String
+    output    String
+    createdAt DateTime @default(now())
+}
+
+model LoginEvent {
+    id        String   @id @default(uuid())
+    userId    String
+    user      User     @relation(fields: [userId], references: [id])
+    ip        String
+    userAgent String
+    device    String
+    location  String?
+    createdAt DateTime @default(now())
+}

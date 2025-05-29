@@ -38,4 +38,12 @@ Return a JSON object with keys: systemPrompt, capabilities (array), roleAssumpti
       return { systemPrompt: content, capabilities: [], roleAssumptions: [] };
     }
   }
+
+  async generateEmbedding(text: string): Promise<number[]> {
+    const response = await this.openai.embeddings.create({
+      model: 'text-embedding-ada-002',
+      input: text,
+    });
+    return response.data[0].embedding;
+  }
 }

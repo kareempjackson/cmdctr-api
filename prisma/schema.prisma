@@ -24,16 +24,25 @@ model User {
     workspaces               Workspace[]
     loginEvents              LoginEvent[]
     WorkspaceMember          WorkspaceMember[]
+    activityLogs             ActivityLog[]
+    auditTrails              AuditTrail[]
+    createdKnowledgeEntries  KnowledgeEntry[]  @relation("KnowledgeEntryCreator")
+    modifiedKnowledgeEntries KnowledgeEntry[]  @relation("KnowledgeEntryModifier")
+    knowledgeTrainings       KnowledgeTraining[]
 }
 
 model Workspace {
-    id        String            @id @default(uuid())
-    name      String
-    createdBy String
-    createdAt DateTime          @default(now())
-    members   WorkspaceMember[]
-    agents    Agent[]
-    creator   User              @relation(fields: [createdBy], references: [id])
+    id              String            @id @default(uuid())
+    name            String
+    createdBy       String
+    createdAt       DateTime          @default(now())
+    members         WorkspaceMember[]
+    agents          Agent[]
+    creator         User              @relation(fields: [createdBy], references: [id])
+    activityLogs    ActivityLog[]
+    auditTrails     AuditTrail[]
+    knowledgeEntries KnowledgeEntry[]
+    knowledgeTags   KnowledgeTag[]
 }
 
 model WorkspaceMember {
@@ -46,15 +55,17 @@ model WorkspaceMember {
 }
 
 model Agent {
-    id          String        @id @default(uuid())
-    name        String
-    purpose     String
-    config      Json
-    workspaceId String
-    createdAt   DateTime      @default(now())
-    workspace   Workspace     @relation(fields: [workspaceId], references: [id])
-    AgentMemory AgentMemory[]
+    id                String              @id @default(uuid())
+    name              String
+    purpose           String
+    config            Json
+    workspaceId       String
+    createdAt         DateTime            @default(now())
+    workspace         Workspace           @relation(fields: [workspaceId], references: [id])
+    AgentMemory       AgentMemory[]
     AgentTrainingFile AgentTrainingFile[]
+    activityLogs      ActivityLog[]
+    knowledgeAccess   KnowledgeAgentAccess[]
 }
 
 model AgentMemory {
@@ -87,4 +98,153 @@ model AgentTrainingFile {
     storagePath String   // Local path or S3 URL
     uploadedAt  DateTime @default(now())
     status      String   @default("ready") // processing, ready, error
+}
+
+model ActivityLog {
+    id          String     @id @default(uuid())
+    userId      String?    // Nullable for system events
+    workspaceId String?    // Nullable for user-level events
+    agentId     String?    // Nullable for non-agent events
+    
+    // Event Classification
+    category    String     // 'auth', 'agent', 'workspace', 'file', 'system'
+    action      String     // 'login', 'execute', 'upload', 'delete', etc.
+    resource    String?    // Resource identifier (file ID, agent ID, etc.)
+    
+    // Event Details
+    description String
+    metadata    Json?      // Flexible metadata storage
+    ipAddress   String?
+    userAgent   String?
+    
+    // Status & Timing
+    status      String     // 'success', 'error', 'warning', 'info'
+    duration    Int?       // Duration in milliseconds
+    timestamp   DateTime   @default(now())
+    
+    // Relations
+    user        User?      @relation(fields: [userId], references: [id])
+    workspace   Workspace? @relation(fields: [workspaceId], references: [id])
+    agent       Agent?     @relation(fields: [agentId], references: [id])
+    
+    @@index([category, action])
+    @@index([timestamp])
+    @@index([userId])
+    @@index([workspaceId])
+    @@index([agentId])
+}
+
+model AuditTrail {
+    id           String    @id @default(uuid())
+    userId       String
+    workspaceId  String
+    
+    // Change Tracking
+    entityType   String    // 'agent', 'workspace', 'user', 'file'
+    entityId     String
+    action       String    // 'create', 'update', 'delete'
+    
+    // Change Details
+    fieldChanges Json?     // Before/after values
+    reason       String?   // Optional reason for change
+    
+    timestamp    DateTime  @default(now())
+    
+    // Relations
+    user         User      @relation(fields: [userId], references: [id])
+    workspace    Workspace @relation(fields: [workspaceId], references: [id])
+    
+    @@index([entityType, entityId])
+    @@index([timestamp])
+    @@index([userId])
+    @@index([workspaceId])
+}
+
+model KnowledgeEntry {
+    id              String                   @id @default(uuid())
+    workspaceId     String
+    type            String                   // 'prompt', 'document', 'page'
+    title           String
+    description     String?
+    content         String?                  // For prompts and pages
+    fileUrl         String?                  // For documents
+    fileName        String?                  // Original file name
+    fileSize        Int?                     // File size in bytes
+    mimeType        String?                  // File MIME type
+    status          String                   @default("draft") // 'draft', 'published', 'archived'
+    version         Int                      @default(1)
+    
+    // Metadata
+    createdBy       String
+    lastModifiedBy  String?
+    createdAt       DateTime                 @default(now())
+    updatedAt       DateTime                 @updatedAt
+    
+    // Training Status
+    trainingStatus  String                   @default("untrained") // 'untrained', 'training', 'trained', 'failed'
+    lastTrainedAt   DateTime?
+    trainingMetrics Json?                    // Accuracy, confidence, etc.
+    
+    // Relations
+    workspace       Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    creator         User                     @relation("KnowledgeEntryCreator", fields: [createdBy], references: [id])
+    lastModifier    User?                    @relation("KnowledgeEntryModifier", fields: [lastModifiedBy], references: [id])
+    tags            KnowledgeTag[]
+    agentAccess     KnowledgeAgentAccess[]
+    trainingHistory KnowledgeTraining[]
+    
+    @@index([workspaceId])
+    @@index([type])
+    @@index([status])
+    @@index([trainingStatus])
+    @@index([createdAt])
+}
+
+model KnowledgeTag {
+    id              String           @id @default(uuid())
+    name            String
+    color           String?          // Hex color for UI
+    workspaceId     String
+    createdAt       DateTime         @default(now())
+    
+    // Relations
+    workspace       Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    knowledgeEntries KnowledgeEntry[]
+    
+    @@unique([name, workspaceId])
+    @@index([workspaceId])
+}
+
+model KnowledgeAgentAccess {
+    id              String         @id @default(uuid())
+    knowledgeEntryId String
+    agentId         String
+    accessLevel     String         @default("read") // 'read', 'write'
+    createdAt       DateTime       @default(now())
+    
+    // Relations
+    knowledgeEntry  KnowledgeEntry @relation(fields: [knowledgeEntryId], references: [id], onDelete: Cascade)
+    agent           Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+    
+    @@unique([knowledgeEntryId, agentId])
+    @@index([agentId])
+}
+
+model KnowledgeTraining {
+    id              String         @id @default(uuid())
+    knowledgeEntryId String
+    status          String         // 'started', 'completed', 'failed'
+    startedAt       DateTime       @default(now())
+    completedAt     DateTime?
+    metrics         Json?          // Training metrics
+    errorMessage    String?        // Error details if failed
+    triggeredBy     String         // User ID who triggered training
+    
+    // Relations
+    knowledgeEntry  KnowledgeEntry @relation(fields: [knowledgeEntryId], references: [id], onDelete: Cascade)
+    user            User           @relation(fields: [triggeredBy], references: [id])
+    
+    @@index([knowledgeEntryId])
+    @@index([status])
+    @@index([startedAt])
 }

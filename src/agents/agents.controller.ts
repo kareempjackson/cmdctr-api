@@ -2,7 +2,7 @@ import { Controller, Get, Post, Patch, Body, Param, Query, Req, UseGuards, UseIn
 import { AgentsService } from './agents.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateAgentDto } from './dto/create-agent.dto';
-import { UpdateAgentDto } from './dto/update-agent.dto';
+import { UpdateAgentDto, UpdateAgentKnowledgeAccessDto } from './dto/update-agent.dto';
 import { ExecuteAgentDto } from './dto/execute-agent.dto';
 import { SearchMemoryDto } from './dto/search-memory.dto';
 import { CloneAgentDto } from './dto/clone-agent.dto';
@@ -297,5 +297,31 @@ export class AgentsController {
   ) {
     const userId = req.user.userId;
     return this.agentsService.cloneAgent(id, dto.name, userId);
+  }
+
+  @ApiOperation({ summary: 'Update agent knowledge access' })
+  @ApiParam({ name: 'id' })
+  @ApiBody({ type: UpdateAgentKnowledgeAccessDto })
+  @ApiResponse({ status: 200, description: 'Agent knowledge access updated' })
+  @Patch(':id/knowledge-access')
+  async updateAgentKnowledgeAccess(
+    @Param('id') id: string,
+    @Body() dto: UpdateAgentKnowledgeAccessDto,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    return this.agentsService.updateAgentKnowledgeAccess(id, dto.knowledgeEntryIds, userId, dto.accessLevel);
+  }
+
+  @ApiOperation({ summary: 'Get agent knowledge access' })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, description: 'Agent knowledge access retrieved' })
+  @Get(':id/knowledge-access')
+  async getAgentKnowledgeAccess(
+    @Param('id') id: string,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    return this.agentsService.getAgentKnowledgeAccess(id, userId);
   }
 }

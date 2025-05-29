@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Inject } from '@nestjs/common';
 import { CreateAgentDto } from './dto/create-agent.dto';
@@ -6,6 +6,8 @@ import { UpdateAgentDto } from './dto/update-agent.dto';
 import { ExecuteAgentDto } from './dto/execute-agent.dto';
 import { OpenaiService } from '../openai/openai.service';
 import { WeaviateService } from '../vector/weaviate.service';
+import { ActivityService } from '../activity/activity.service';
+import { KnowledgeService } from '../knowledge/knowledge.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { unlinkSync, existsSync } from 'fs';
@@ -17,6 +19,8 @@ export class AgentsService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(OpenaiService) private readonly openai: OpenaiService,
     @Inject(WeaviateService) private readonly weaviate: WeaviateService,
+    @Inject(ActivityService) private readonly activityService: ActivityService,
+    @Inject(KnowledgeService) private readonly knowledgeService: KnowledgeService,
   ) {}
 
   async getAgentsForUser(userId: string, page = 1, pageSize = 10) {
@@ -52,8 +56,10 @@ export class AgentsService {
       where: { userId, workspaceId: dto.workspaceId },
     });
     if (!member) throw new ForbiddenException('Not a member of this workspace');
+    
     // Generate agent config
     const config = await this.openai.generateAgentConfig(dto.name, dto.purpose);
+    
     // Create agent
     const agent = await this.prisma.agent.create({
       data: {
@@ -63,8 +69,27 @@ export class AgentsService {
         workspaceId: dto.workspaceId,
       },
     });
+    
     // Initialize Weaviate namespace
     await this.weaviate.initAgentMemory(agent.id);
+    
+    // Log activity
+    await this.activityService.logAgentActivity(
+      agent.id,
+      userId,
+      'create',
+      { agentName: dto.name, purpose: dto.purpose },
+    );
+    
+    // Log audit trail
+    await this.activityService.logEntityCreation(
+      'agent',
+      agent.id,
+      userId,
+      dto.workspaceId,
+      { name: dto.name, purpose: dto.purpose },
+    );
+    
     return agent;
   }
 
@@ -106,6 +131,8 @@ export class AgentsService {
   }
 
   async executeAgent(agentId: string, dto: ExecuteAgentDto, userId: string) {
+    const startTime = Date.now();
+    
     // 1. Ensure user is a member of the agent's workspace
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) throw new NotFoundException('Agent not found');
@@ -114,57 +141,134 @@ export class AgentsService {
     });
     if (!member) throw new ForbiddenException('Not a member of this workspace');
 
-    // 2. Generate embedding for user input
-    const inputEmbedding = await this.openai.generateEmbedding(dto.input);
+    try {
+      // 2. Generate embedding for user input
+      const inputEmbedding = await this.openai.generateEmbedding(dto.input);
 
-    // 3. Retrieve relevant memory from Weaviate
-    const relevantMemories = await this.weaviate.searchMemory(agentId, inputEmbedding, 5);
+      // 3. Retrieve relevant memory from Weaviate
+      const relevantMemories = await this.weaviate.searchMemory(agentId, inputEmbedding, 5);
 
-    // 4. Inject memory into system prompt
-    let memoryContext = '';
-    if (relevantMemories.length > 0) {
-      memoryContext = '\nRelevant past interactions:';
-      for (const mem of relevantMemories) {
-        memoryContext += `\n- Q: ${mem.input}\n  A: ${mem.output}`;
+      // 4. Retrieve relevant knowledge base entries
+      const knowledgeEntries = await this.getRelevantKnowledgeEntries(agentId, dto.input, userId);
+      console.log(`Found ${knowledgeEntries.length} relevant knowledge entries for agent execution`);
+
+      // 5. Build context from memory and knowledge base
+      let memoryContext = '';
+      if (relevantMemories.length > 0) {
+        memoryContext = '\nRelevant past interactions:';
+        for (const mem of relevantMemories) {
+          memoryContext += `\n- Q: ${mem.input}\n  A: ${mem.output}`;
+        }
       }
+
+      let knowledgeContext = '';
+      if (knowledgeEntries.length > 0) {
+        knowledgeContext = '\nRelevant knowledge base entries:';
+        for (const entry of knowledgeEntries) {
+          knowledgeContext += `\n- Title: ${entry.title}`;
+          if (entry.description) {
+            knowledgeContext += `\n  Description: ${entry.description}`;
+          }
+          if (entry.content) {
+            // Limit content length to avoid token overflow
+            const truncatedContent = entry.content.length > 500 
+              ? entry.content.substring(0, 500) + '...' 
+              : entry.content;
+            knowledgeContext += `\n  Content: ${truncatedContent}`;
+          }
+          knowledgeContext += '\n';
+        }
+      }
+
+      // 6. Build system prompt with agent purpose, memory, and knowledge
+      let systemPrompt = '';
+      if (agent.config && typeof agent.config === 'object' && 'systemPrompt' in agent.config) {
+        systemPrompt = (agent.config as any).systemPrompt;
+      } else {
+        systemPrompt = agent.purpose || '';
+      }
+      
+      // Add knowledge base context first (more authoritative)
+      if (knowledgeContext) {
+        systemPrompt += knowledgeContext;
+      }
+      
+      // Add memory context
+      if (memoryContext) {
+        systemPrompt += memoryContext;
+      }
+
+      // 7. Use OpenAI to generate a response
+      const completion = await this.openai['openai'].chat.completions.create({
+        model: 'gpt-4-1106-preview',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: dto.input },
+        ],
+        temperature: 0.7,
+        max_tokens: 512,
+      });
+      const output = completion.choices[0]?.message?.content || '';
+
+      // 8. Generate embedding for the response
+      const outputEmbedding = await this.openai.generateEmbedding(output);
+
+      // 9. Store the interaction in Weaviate
+      await this.weaviate.storeMemory(
+        agentId,
+        dto.input,
+        output,
+        outputEmbedding,
+        new Date().toISOString(),
+        { 
+          ...dto.metadata || {},
+          knowledgeEntriesUsed: knowledgeEntries.map(e => e.id),
+        },
+      );
+
+      const duration = Date.now() - startTime;
+
+      // 10. Log successful execution
+      await this.activityService.logAgentActivity(
+        agentId,
+        userId,
+        'execute',
+        {
+          inputLength: dto.input.length,
+          outputLength: output.length,
+          memoriesUsed: relevantMemories.length,
+          knowledgeEntriesUsed: knowledgeEntries.length,
+          model: 'gpt-4-1106-preview',
+        },
+        duration,
+      );
+
+      // 11. Return the response and context used
+      return {
+        output,
+        memoryUsed: relevantMemories,
+        knowledgeUsed: knowledgeEntries.map(entry => ({
+          id: entry.id,
+          title: entry.title,
+          type: entry.type,
+          description: entry.description,
+        })),
+      };
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      
+      // Log failed execution
+      await this.activityService.logError(
+        'agent',
+        'execute',
+        error,
+        userId,
+        agent.workspaceId,
+        agentId,
+      );
+      
+      throw error;
     }
-    let systemPrompt = '';
-    if (agent.config && typeof agent.config === 'object' && 'systemPrompt' in agent.config) {
-      systemPrompt = (agent.config as any).systemPrompt + memoryContext;
-    } else {
-      systemPrompt = (agent.purpose || '') + memoryContext;
-    }
-
-    // 5. Use OpenAI to generate a response (LangChain can be added later)
-    const completion = await this.openai['openai'].chat.completions.create({
-      model: 'gpt-4-1106-preview',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: dto.input },
-      ],
-      temperature: 0.7,
-      max_tokens: 512,
-    });
-    const output = completion.choices[0]?.message?.content || '';
-
-    // 6. Generate embedding for the response
-    const outputEmbedding = await this.openai.generateEmbedding(output);
-
-    // 7. Store the interaction in Weaviate
-    await this.weaviate.storeMemory(
-      agentId,
-      dto.input,
-      output,
-      outputEmbedding,
-      new Date().toISOString(),
-      dto.metadata || {},
-    );
-
-    // 8. Return the response and memory used
-    return {
-      output,
-      memoryUsed: relevantMemories,
-    };
   }
 
   async uploadTrainingFile(agentId: string, file: any, userId: string) {
@@ -501,6 +605,20 @@ export class AgentsService {
     // Get interactions from Weaviate (filter out training file entries)
     const className = `AgentMemory_${agentId.replace(/-/g, '')}`;
     try {
+      // First, get total count
+      const totalResult = await this.weaviate['client'].graphql.aggregate()
+        .withClassName(className)
+        .withWhere({
+          path: ['output'],
+          operator: 'NotEqual',
+          valueText: '[TRAINING FILE]'
+        })
+        .withFields('meta { count }')
+        .do();
+      
+      const total = totalResult?.data?.Aggregate?.[className]?.[0]?.meta?.count || 0;
+
+      // Then get paginated results
       const result = await this.weaviate['client'].graphql.get()
         .withClassName(className)
         .withFields('input output timestamp metadata _additional { id }')
@@ -524,7 +642,7 @@ export class AgentsService {
         })),
         page,
         pageSize,
-        total: interactions.length,
+        total,
       };
     } catch (err) {
       return { interactions: [], page, pageSize, total: 0 };
@@ -721,5 +839,193 @@ export class AgentsService {
         purpose: newAgent.purpose,
       }
     };
+  }
+
+  /**
+   * Retrieve relevant knowledge base entries that the agent has access to
+   */
+  private async getRelevantKnowledgeEntries(agentId: string, userInput: string, userId: string) {
+    try {
+      // Get the agent to find its workspace
+      const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+      if (!agent) return [];
+
+      // Get knowledge entries that this agent has access to
+      const agentKnowledgeAccess = await this.prisma.knowledgeAgentAccess.findMany({
+        where: { agentId },
+        include: {
+          knowledgeEntry: {
+            include: {
+              tags: true,
+              creator: {
+                select: { name: true }
+              }
+            }
+          }
+        }
+      });
+
+      if (agentKnowledgeAccess.length === 0) return [];
+
+      // Extract knowledge entries
+      const knowledgeEntries = agentKnowledgeAccess
+        .map(access => access.knowledgeEntry)
+        .filter(entry => entry.status === 'published'); // Only use published entries
+
+      if (knowledgeEntries.length === 0) return [];
+
+      // Simple relevance scoring based on text similarity
+      const relevantEntries: Array<any> = [];
+      const inputLower = userInput.toLowerCase();
+
+      for (const entry of knowledgeEntries) {
+        let relevanceScore = 0;
+        
+        // Check title relevance
+        if (entry.title.toLowerCase().includes(inputLower)) {
+          relevanceScore += 3;
+        }
+        
+        // Check description relevance
+        if (entry.description && entry.description.toLowerCase().includes(inputLower)) {
+          relevanceScore += 2;
+        }
+        
+        // Check content relevance (basic keyword matching)
+        if (entry.content) {
+          const contentLower = entry.content.toLowerCase();
+          const inputWords = inputLower.split(/\s+/).filter(word => word.length > 3);
+          
+          for (const word of inputWords) {
+            if (contentLower.includes(word)) {
+              relevanceScore += 1;
+            }
+          }
+        }
+        
+        // Check tag relevance
+        for (const tag of entry.tags) {
+          if (tag.name.toLowerCase().includes(inputLower)) {
+            relevanceScore += 2;
+          }
+        }
+
+        if (relevanceScore > 0) {
+          relevantEntries.push({
+            ...entry,
+            relevanceScore
+          });
+        }
+      }
+
+      // Sort by relevance score and return top 3
+      return relevantEntries
+        .sort((a, b) => b.relevanceScore - a.relevanceScore)
+        .slice(0, 3)
+        .map(({ relevanceScore, ...entry }) => entry);
+
+    } catch (error) {
+      console.error('Error retrieving knowledge entries:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get knowledge entries that an agent has access to
+   */
+  async getAgentKnowledgeAccess(agentId: string, userId: string) {
+    // Ensure user is a member of the agent's workspace
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const member = await this.prisma.workspaceMember.findFirst({
+      where: { userId, workspaceId: agent.workspaceId },
+    });
+    if (!member) throw new ForbiddenException('Not a member of this workspace');
+
+    const knowledgeAccess = await this.prisma.knowledgeAgentAccess.findMany({
+      where: { agentId },
+      include: {
+        knowledgeEntry: {
+          include: {
+            tags: true,
+            creator: {
+              select: { name: true }
+            }
+          }
+        }
+      }
+    });
+
+    return knowledgeAccess.map(access => ({
+      id: access.id,
+      accessLevel: access.accessLevel,
+      createdAt: access.createdAt,
+      knowledgeEntry: {
+        id: access.knowledgeEntry.id,
+        title: access.knowledgeEntry.title,
+        description: access.knowledgeEntry.description,
+        type: access.knowledgeEntry.type,
+        status: access.knowledgeEntry.status,
+        tags: access.knowledgeEntry.tags,
+        createdBy: access.knowledgeEntry.creator.name,
+        createdAt: access.knowledgeEntry.createdAt,
+        updatedAt: access.knowledgeEntry.updatedAt,
+      }
+    }));
+  }
+
+  /**
+   * Update agent knowledge access
+   */
+  async updateAgentKnowledgeAccess(agentId: string, knowledgeEntryIds: string[], userId: string, accessLevel: 'read' | 'write' = 'read') {
+    // Ensure user is a member of the agent's workspace
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const member = await this.prisma.workspaceMember.findFirst({
+      where: { userId, workspaceId: agent.workspaceId },
+    });
+    if (!member) throw new ForbiddenException('Not a member of this workspace');
+
+    // Verify all knowledge entries belong to the same workspace
+    const knowledgeEntries = await this.prisma.knowledgeEntry.findMany({
+      where: { 
+        id: { in: knowledgeEntryIds },
+        workspaceId: agent.workspaceId 
+      }
+    });
+
+    if (knowledgeEntries.length !== knowledgeEntryIds.length) {
+      throw new BadRequestException('Some knowledge entries not found or not in the same workspace');
+    }
+
+    // Remove existing access
+    await this.prisma.knowledgeAgentAccess.deleteMany({
+      where: { agentId }
+    });
+
+    // Add new access
+    if (knowledgeEntryIds.length > 0) {
+      await this.prisma.knowledgeAgentAccess.createMany({
+        data: knowledgeEntryIds.map(entryId => ({
+          agentId,
+          knowledgeEntryId: entryId,
+          accessLevel
+        }))
+      });
+    }
+
+    // Log activity
+    await this.activityService.logAgentActivity(
+      agentId,
+      userId,
+      'knowledge-access-update',
+      {
+        knowledgeEntriesCount: knowledgeEntryIds.length,
+        accessLevel,
+        entryIds: knowledgeEntryIds,
+      },
+    );
+
+    return { success: true, message: 'Agent knowledge access updated successfully' };
   }
 }

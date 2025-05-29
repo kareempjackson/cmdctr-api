@@ -29,6 +29,14 @@ model User {
     createdKnowledgeEntries  KnowledgeEntry[]  @relation("KnowledgeEntryCreator")
     modifiedKnowledgeEntries KnowledgeEntry[]  @relation("KnowledgeEntryModifier")
     knowledgeTrainings       KnowledgeTraining[]
+    notes                    Note[]            @relation("NoteCreator")
+    jots                     Jot[]             @relation("JotCreator")
+    notifications            Notification[]    @relation("NotificationRecipient")
+    notificationPreferences  NotificationPreference[] @relation("NotificationPreferences")
+    notificationDigests      NotificationDigest[] @relation("NotificationDigests")
+    ownedProjects            Project[]         @relation("ProjectOwner")
+    createdCanvases          Canvas[]          @relation("CanvasCreator")
+    createdBlocks            Block[]           @relation("BlockCreator")
 }
 
 model Workspace {
@@ -43,6 +51,13 @@ model Workspace {
     auditTrails     AuditTrail[]
     knowledgeEntries KnowledgeEntry[]
     knowledgeTags   KnowledgeTag[]
+    canvasLayouts   CanvasLayout[]
+    notes           Note[]
+    jots            Jot[]
+    notifications   Notification[]
+    notificationPreferences NotificationPreference[]
+    notificationDigests NotificationDigest[]
+    projects        Project[]
 }
 
 model WorkspaceMember {
@@ -66,6 +81,7 @@ model Agent {
     AgentTrainingFile AgentTrainingFile[]
     activityLogs      ActivityLog[]
     knowledgeAccess   KnowledgeAgentAccess[]
+    projectAgents     ProjectAgent[]
 }
 
 model AgentMemory {
@@ -247,4 +263,377 @@ model KnowledgeTraining {
     @@index([knowledgeEntryId])
     @@index([status])
     @@index([startedAt])
+}
+
+model Project {
+    id              String         @id @default(uuid())
+    name            String
+    slug            String         // URL-friendly identifier
+    workspaceId     String
+    ownerId         String         // Project owner/creator
+    description     String?
+    aiContext       String?        // AI context for project understanding
+    colorTheme      String?        // Hex color for project theme
+    
+    // Status and metadata
+    status          String         @default("active") // 'active', 'archived', 'completed'
+    isPublic        Boolean        @default(false)    // Whether project is publicly accessible
+    
+    // Timestamps
+    createdAt       DateTime       @default(now())
+    updatedAt       DateTime       @updatedAt
+    
+    // Relations
+    workspace       Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    owner           User           @relation("ProjectOwner", fields: [ownerId], references: [id])
+    canvases        Canvas[]
+    agents          ProjectAgent[] // Agents tied to this project
+    
+    @@unique([workspaceId, slug])
+    @@index([workspaceId])
+    @@index([ownerId])
+    @@index([status])
+    @@index([createdAt])
+}
+
+model Canvas {
+    id          String        @id @default(uuid())
+    name        String        @default("Untitled Canvas")
+    projectId   String        // Reference to parent project
+    type        String        @default("custom") // 'kanban', 'table', 'calendar', 'document', 'custom'
+    description String?
+    createdBy   String
+    
+    // Canvas configuration
+    config      Json          @default("{}")  // Canvas-specific settings
+    aiContext   String?       // AI context for this canvas
+    layout      String        @default("freeform") // 'freeform', 'grid', 'linear'
+    
+    // Status and permissions
+    isTemplate  Boolean       @default(false)
+    isPublic    Boolean       @default(false)
+    
+    // Timestamps
+    createdAt   DateTime      @default(now())
+    updatedAt   DateTime      @updatedAt
+    
+    // Relations
+    project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    creator     User          @relation("CanvasCreator", fields: [createdBy], references: [id])
+    blocks      Block[]
+    
+    @@index([projectId])
+    @@index([createdBy])
+    @@index([type])
+    @@index([createdAt])
+}
+
+model Block {
+    id          String       @id @default(uuid())
+    canvasId    String
+    type        String       // 'text', 'table', 'chart', 'agent', 'kanban', 'calendar', 'document', etc.
+    order       Int          // Order position in canvas
+    x           Float?       // X coordinate for free-form layouts
+    y           Float?       // Y coordinate for free-form layouts
+    width       Float?       // Block width
+    height      Float?       // Block height
+    
+    // Block content and configuration
+    title       String?      // Block title
+    content     Json         @default("{}") // Block data content
+    config      Json         @default("{}") // Block-specific configuration
+    metadata    Json?        // Additional metadata
+    
+    // Block properties
+    isCollapsed Boolean      @default(false)
+    isLocked    Boolean      @default(false)
+    createdBy   String
+    
+    // Timestamps
+    createdAt   DateTime     @default(now())
+    updatedAt   DateTime     @updatedAt
+    
+    // Relations
+    canvas      Canvas       @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+    creator     User         @relation("BlockCreator", fields: [createdBy], references: [id])
+    
+    @@index([canvasId])
+    @@index([order])
+    @@index([type])
+    @@index([createdBy])
+    @@index([createdAt])
+}
+
+model ProjectAgent {
+    id          String       @id @default(uuid())
+    projectId   String
+    agentId     String
+    role        String       @default("assistant") // 'assistant', 'analyst', 'reviewer', etc.
+    isActive    Boolean      @default(true)
+    config      Json?        // Project-specific agent configuration
+    createdAt   DateTime     @default(now())
+    
+    // Relations
+    project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    agent       Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+    
+    @@unique([projectId, agentId])
+    @@index([projectId])
+    @@index([agentId])
+}
+
+// Legacy model - keeping for backward compatibility, will be deprecated
+model CanvasLayout {
+    id          String        @id @default(uuid())
+    workspaceId String
+    name        String        @default("Untitled Canvas")
+    description String?
+    createdBy   String
+    createdAt   DateTime      @default(now())
+    updatedAt   DateTime      @updatedAt
+    
+    // Relations
+    workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    blocks      CanvasBlock[]
+    
+    @@index([workspaceId])
+    @@index([createdAt])
+}
+
+model CanvasBlock {
+    id          String       @id @default(uuid())
+    canvasId    String
+    type        String       // 'text', 'table', 'chart', 'task-list', 'kanban', 'calendar', etc.
+    position    Int          // Order position in canvas
+    x           Float?       // X coordinate for free-form layouts
+    y           Float?       // Y coordinate for free-form layouts
+    width       Float?       // Block width
+    height      Float?       // Block height
+    
+    // Block Configuration
+    title       String?      // Block title
+    config      Json         // Block-specific configuration
+    data        Json?        // Block data content
+    metadata    Json?        // Additional metadata
+    
+    // Timestamps
+    createdAt   DateTime     @default(now())
+    updatedAt   DateTime     @updatedAt
+    
+    // Relations
+    canvas      CanvasLayout @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+    
+    @@index([canvasId])
+    @@index([position])
+    @@index([type])
+}
+
+model Note {
+    id          String    @id @default(uuid())
+    title       String
+    content     String
+    workspaceId String
+    createdBy   String
+    
+    // Note Properties
+    color       String?   // Color theme for the note
+    isPinned    Boolean   @default(false)
+    isArchived  Boolean   @default(false)
+    
+    // Metadata
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    
+    // Relations
+    workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    creator     User      @relation("NoteCreator", fields: [createdBy], references: [id])
+    tags        NoteTag[]
+    
+    @@index([workspaceId])
+    @@index([createdBy])
+    @@index([isPinned])
+    @@index([isArchived])
+    @@index([createdAt])
+}
+
+model Jot {
+    id          String    @id @default(uuid())
+    text        String    // Quick text content
+    workspaceId String
+    createdBy   String
+    
+    // Jot Properties
+    color       String?   // Color theme for the jot
+    completed   Boolean   @default(false) // For task-like jots
+    priority    String?   // high, medium, low
+    
+    // Metadata
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    
+    // Relations
+    workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    creator     User      @relation("JotCreator", fields: [createdBy], references: [id])
+    
+    @@index([workspaceId])
+    @@index([createdBy])
+    @@index([completed])
+    @@index([priority])
+    @@index([createdAt])
+}
+
+model NoteTag {
+    id        String @id @default(uuid())
+    name      String
+    color     String?
+    noteId    String
+    createdAt DateTime @default(now())
+    
+    // Relations
+    note      Note   @relation(fields: [noteId], references: [id], onDelete: Cascade)
+    
+    @@index([noteId])
+    @@index([name])
+}
+
+// Notifications System
+model Notification {
+    id          String   @id @default(uuid())
+    recipientId String   // User who receives the notification
+    workspaceId String?  // Optional - workspace-specific notifications
+    
+    // Content
+    title       String   // Short title/summary
+    message     String   // Full notification message
+    type        String   // 'system', 'activity', 'collaboration', 'task', 'security'
+    category    String?  // More specific categorization within type
+    priority    String   @default("medium") // 'critical', 'high', 'medium', 'low'
+    
+    // Status & Delivery
+    isRead      Boolean  @default(false)
+    readAt      DateTime?
+    deliveryChannels Json // Array of channels: ['in-app', 'email', 'push']
+    emailSent   Boolean  @default(false)
+    emailSentAt DateTime?
+    
+    // Action & Context
+    actionUrl   String?  // URL to navigate when clicked
+    actionText  String?  // Text for action button
+    resourceId  String?  // ID of related resource (agent, note, etc.)
+    resourceType String? // Type of resource ('agent', 'note', 'jot', 'workspace', etc.)
+    
+    // Metadata
+    metadata    Json?    // Additional context data
+    expiresAt   DateTime? // Optional expiration for temporary notifications
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+    
+    // Relations
+    recipient   User     @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+    workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    
+    @@index([recipientId])
+    @@index([workspaceId])
+    @@index([type])
+    @@index([priority])
+    @@index([isRead])
+    @@index([createdAt])
+    @@index([expiresAt])
+}
+
+model NotificationTemplate {
+    id          String   @id @default(uuid())
+    name        String   @unique // Template identifier
+    type        String   // Notification type this template is for
+    category    String?  // Category within type
+    
+    // Template Content
+    titleTemplate   String // Template with placeholders like {{agentName}}
+    messageTemplate String // Message template with placeholders
+    emailTemplate   String? // HTML email template (optional)
+    
+    // Settings
+    defaultPriority String @default("medium")
+    defaultChannels Json   // Default delivery channels
+    isActive        Boolean @default(true)
+    
+    // Metadata
+    description     String?
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+    
+    @@index([type])
+    @@index([category])
+    @@index([isActive])
+}
+
+model NotificationPreference {
+    id          String   @id @default(uuid())
+    userId      String
+    workspaceId String?  // Optional - workspace-specific preferences
+    
+    // Preference Settings
+    type        String   // Notification type
+    category    String?  // Specific category
+    channels    Json     // Preferred delivery channels
+    enabled     Boolean  @default(true)
+    priority    String?  // Minimum priority level to receive
+    
+    // Scheduling
+    quietHoursStart String? // Format: "22:00" for 10 PM
+    quietHoursEnd   String? // Format: "08:00" for 8 AM
+    timezone        String? // User's timezone
+    
+    // Frequency Control
+    digestMode      Boolean @default(false) // Bundle notifications into digest
+    digestFrequency String? // 'daily', 'weekly', 'immediately'
+    
+    // Metadata
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+    
+    // Relations
+    user        User     @relation("NotificationPreferences", fields: [userId], references: [id], onDelete: Cascade)
+    workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    
+    @@unique([userId, workspaceId, type, category])
+    @@index([userId])
+    @@index([workspaceId])
+    @@index([type])
+}
+
+model NotificationDigest {
+    id          String   @id @default(uuid())
+    userId      String
+    workspaceId String?
+    
+    // Digest Settings
+    frequency   String   // 'daily', 'weekly'
+    scheduleDay String?  // For weekly: 'monday', 'tuesday', etc.
+    scheduleTime String  // Time to send: "09:00"
+    timezone    String   @default("UTC")
+    
+    // Content Filters
+    includeTypes     Json // Array of notification types to include
+    minPriority      String @default("medium")
+    maxNotifications Int    @default(20) // Max notifications per digest
+    
+    // Delivery Status
+    lastSentAt       DateTime?
+    nextScheduledAt  DateTime?
+    isActive         Boolean @default(true)
+    
+    // Metadata
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+    
+    // Relations
+    user        User     @relation("NotificationDigests", fields: [userId], references: [id], onDelete: Cascade)
+    workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+    
+    @@unique([userId, workspaceId, frequency])
+    @@index([userId])
+    @@index([workspaceId])
+    @@index([isActive])
+    @@index([nextScheduledAt])
 }

@@ -119,11 +119,41 @@ export class AuthService {
         updatedAt: true,
       },
     });
+    
     // Fetch all workspaces for this user
-    const memberships = await this.prisma.workspaceMember.findMany({
+    let memberships = await this.prisma.workspaceMember.findMany({
       where: { userId },
       include: { workspace: true },
     });
+    
+    // If user has no workspaces, create a default one
+    if (memberships.length === 0) {
+      console.log('User has no workspaces, creating default workspace for user:', userId);
+      
+      // Create default workspace
+      const defaultWorkspace = await this.prisma.workspace.create({
+        data: {
+          name: `${user?.name || 'My'} Workspace`,
+          createdBy: userId,
+        },
+      });
+      
+      // Add user as member of the workspace
+      await this.prisma.workspaceMember.create({
+        data: {
+          userId,
+          workspaceId: defaultWorkspace.id,
+          role: 'owner',
+        },
+      });
+      
+      // Refresh memberships
+      memberships = await this.prisma.workspaceMember.findMany({
+        where: { userId },
+        include: { workspace: true },
+      });
+    }
+    
     type WorkspaceWithCurrent = {
       id: string;
       name: string;
@@ -162,6 +192,33 @@ export class AuthService {
       workspaces,
       currentWorkspaceId,
     };
+  }
+
+  async updateMe(userId: string, updateData: { name?: string; email?: string; avatar?: string }) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new BadRequestException('User not found');
+    }
+
+    // Check if email is being changed and if it's already taken
+    if (updateData.email && updateData.email !== user.email) {
+      const existingUser = await this.prisma.user.findUnique({
+        where: { email: updateData.email },
+      });
+      if (existingUser) {
+        throw new BadRequestException('Email already in use');
+      }
+    }
+
+    // Update user
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        name: updateData.name,
+        email: updateData.email,
+        // Note: avatar field would need to be added to the User model if needed
+      },
+    });
   }
 
   async generateTokens(

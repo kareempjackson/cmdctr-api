@@ -7,6 +7,7 @@ import {
   Get,
   Query,
   Res,
+  Patch,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import {
@@ -14,6 +15,7 @@ import {
   LoginDto,
   AuthResponseDto,
   GetMeResponseDto,
+  UpdateMeDto,
 } from './dto/auth.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { Request, Response } from 'express';
@@ -23,6 +25,7 @@ import {
   ApiResponse,
   ApiBody,
   ApiQuery,
+  ApiBearerAuth,
 } from '@nestjs/swagger';
 
 @ApiTags('auth')
@@ -118,6 +121,22 @@ export class AuthController {
   @Get('me')
   async me(@Req() req: any): Promise<GetMeResponseDto> {
     console.log('req.user in /auth/me:', req.user);
+    return this.authService.getMe(req.user.userId);
+  }
+
+  @ApiOperation({ summary: 'Update current user info' })
+  @ApiBody({ type: UpdateMeDto })
+  @ApiResponse({
+    status: 200,
+    description: 'User updated successfully.',
+    type: GetMeResponseDto,
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized.' })
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @Patch('me')
+  async updateMe(@Req() req: any, @Body() updateDto: UpdateMeDto): Promise<GetMeResponseDto> {
+    await this.authService.updateMe(req.user.userId, updateDto);
     return this.authService.getMe(req.user.userId);
   }
 

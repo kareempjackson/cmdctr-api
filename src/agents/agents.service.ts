@@ -132,7 +132,10 @@ export class AgentsService {
 
   async executeAgent(agentId: string, dto: ExecuteAgentDto, userId: string) {
     const startTime = Date.now();
-    
+    // Validate input
+    if (!dto.input || typeof dto.input !== 'string' || dto.input.trim().length === 0) {
+      throw new BadRequestException('Input is required and cannot be empty');
+    }
     // 1. Ensure user is a member of the agent's workspace
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) throw new NotFoundException('Agent not found');
@@ -143,7 +146,7 @@ export class AgentsService {
 
     try {
       // 2. Generate embedding for user input
-      const inputEmbedding = await this.openai.generateEmbedding(dto.input);
+      const inputEmbedding = await this.openai.generateEmbedding(dto.input.trim());
 
       // 3. Retrieve relevant memory from Weaviate
       const relevantMemories = await this.weaviate.searchMemory(agentId, inputEmbedding, 5);
@@ -440,6 +443,10 @@ export class AgentsService {
   }
 
   async searchAgentMemory(agentId: string, query: string, userId: string, limit = 10) {
+    // Validate query input
+    if (!query || typeof query !== 'string' || query.trim().length === 0) {
+      throw new BadRequestException('Query is required and cannot be empty');
+    }
     // Ensure user is a member of the agent's workspace
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) throw new NotFoundException('Agent not found');
@@ -449,7 +456,7 @@ export class AgentsService {
     if (!member) throw new ForbiddenException('Not a member of this workspace');
 
     // Generate embedding for search query
-    const queryEmbedding = await this.openai.generateEmbedding(query);
+    const queryEmbedding = await this.openai.generateEmbedding(query.trim());
     
     // Search memory
     const memories = await this.weaviate.searchMemory(agentId, queryEmbedding, limit);

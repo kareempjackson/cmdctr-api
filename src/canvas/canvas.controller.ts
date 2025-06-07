@@ -11,7 +11,7 @@ import {
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
-import { IsString, IsOptional } from 'class-validator';
+import { IsString, IsOptional, IsObject, IsNumber } from 'class-validator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import {
   CanvasService,
@@ -39,10 +39,22 @@ export class CreateCanvasFromPromptDto {
 }
 
 export class AddBlockDto {
+  @IsString()
   type: string;
+
+  @IsOptional()
+  @IsString()
   title?: string;
-  config: any;
+
+  @IsOptional()
+  @IsObject()
+  config: any = {};
+
+  @IsOptional()
   data?: any;
+
+  @IsOptional()
+  @IsNumber()
   position?: number;
 }
 
@@ -145,6 +157,7 @@ export class CanvasController {
     @Body() dto: AddBlockDto,
     @Request() req: any,
   ): Promise<CanvasBlock> {
+    console.log('CanvasController.addBlock received DTO:', dto);
     const blockInstruction: BlockInstruction = {
       type: dto.type,
       title: dto.title,

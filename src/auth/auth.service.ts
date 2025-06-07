@@ -81,6 +81,9 @@ export class AuthService {
   }
 
   async login(dto: LoginDto, req: Request): Promise<AuthResponseDto> {
+    if (!dto.email) {
+      throw new BadRequestException('Email is required');
+    }
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });

@@ -93,7 +93,7 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthResponseDto> {
-    console.log('/auth/login endpoint hit. Email:', dto.email);
+    console.log('/auth/login endpoint hit. Email:', dto.email, 'DTO:', dto, 'Body:', req.body);
     const tokens = await this.authService.login(dto, req);
     res.cookie('accessToken', tokens.accessToken, {
       httpOnly: true,

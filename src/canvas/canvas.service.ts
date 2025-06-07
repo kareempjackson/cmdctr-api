@@ -227,16 +227,20 @@ export class CanvasService {
 
     const nextPosition = (maxPosition._max.position || -1) + 1;
 
+    console.log('CanvasService.addBlock received block:', block);
+    const prismaData = {
+      canvasId,
+      type: block.type,
+      position: block.position ?? nextPosition,
+      title: block.title,
+      config: block.config || {},
+      data: block.data || null,
+      metadata: {},
+    };
+    console.log('CanvasService.addBlock prismaData:', prismaData);
+
     const createdBlock = await this.prisma.canvasBlock.create({
-      data: {
-        canvasId,
-        type: block.type,
-        position: block.position ?? nextPosition,
-        title: block.title,
-        config: block.config || {},
-        data: block.data || null,
-        metadata: {},
-      },
+      data: prismaData,
     });
 
     return this.formatBlockResponse(createdBlock);

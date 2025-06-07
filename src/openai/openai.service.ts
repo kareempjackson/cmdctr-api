@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '../config/config.service';
 import OpenAI from 'openai';
 
@@ -40,9 +40,13 @@ Return a JSON object with keys: systemPrompt, capabilities (array), roleAssumpti
   }
 
   async generateEmbedding(text: string): Promise<number[]> {
+    // Validate input
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      throw new BadRequestException('Text input is required and cannot be empty for embedding generation');
+    }
     const response = await this.openai.embeddings.create({
       model: 'text-embedding-ada-002',
-      input: text,
+      input: text.trim(),
     });
     return response.data[0].embedding;
   }

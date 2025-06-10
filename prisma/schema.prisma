@@ -37,6 +37,9 @@ model User {
     ownedProjects            Project[]         @relation("ProjectOwner")
     createdCanvases          Canvas[]          @relation("CanvasCreator")
     createdBlocks            Block[]           @relation("BlockCreator")
+    assistantMessages        AssistantMessage[]
+    preferences              Json?
+    usage                    Usage?
 }
 
 model Workspace {
@@ -58,6 +61,7 @@ model Workspace {
     notificationPreferences NotificationPreference[]
     notificationDigests NotificationDigest[]
     projects        Project[]
+    assistantMessages AssistantMessage[]
 }
 
 model WorkspaceMember {
@@ -636,4 +640,32 @@ model NotificationDigest {
     @@index([workspaceId])
     @@index([isActive])
     @@index([nextScheduledAt])
+}
+
+model AssistantMessage {
+    id          String   @id @default(uuid())
+    userId      String
+    workspaceId String
+    role        String   // 'user' or 'assistant'
+    content     String
+    timestamp   DateTime @default(now())
+
+    user        User      @relation(fields: [userId], references: [id])
+    workspace   Workspace @relation(fields: [workspaceId], references: [id])
+
+    @@index([userId])
+    @@index([workspaceId])
+    @@index([timestamp])
+}
+
+model Usage {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  promptsUsed  Int      @default(0)
+  promptsLimit Int      @default(100)
+  resetDate    DateTime
+  tier         String   @default("free")
+  user         User     @relation(fields: [userId], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }

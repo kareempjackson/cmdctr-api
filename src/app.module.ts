@@ -13,9 +13,16 @@ import { CanvasModule } from './canvas/canvas.module';
 import { NotesModule } from './notes/notes.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ProjectsModule } from './projects/projects.module';
+import { OpenaiModule } from './openai/openai.module';
+import { AssistantModule } from './assistant/assistant.module';
+import { FilesModule } from './files/files.module';
+import { BillingModule } from './billing/billing.module';
+import { UsageModule } from './usage/usage.module';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
+    ScheduleModule.forRoot(),
     AuthModule, 
     OnboardingModule, 
     AgentsModule, 
@@ -27,7 +34,12 @@ import { ProjectsModule } from './projects/projects.module';
     CanvasModule,
     NotesModule,
     NotificationsModule,
-    ProjectsModule
+    ProjectsModule,
+    OpenaiModule,
+    AssistantModule,
+    FilesModule,
+    BillingModule,
+    UsageModule
   ],
   controllers: [AppController],
   providers: [AppService],

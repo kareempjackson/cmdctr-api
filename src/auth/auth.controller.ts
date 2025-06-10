@@ -196,4 +196,24 @@ export class AuthController {
     });
     return tokens;
   }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('me/preferences')
+  async getPreferences(@Req() req: any) {
+    return req.user.preferences || {};
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('me/preferences')
+  async updatePreferences(@Req() req: any, @Body() body: any) {
+    // Update preferences JSON field
+    const userId = req.user.userId;
+    const prisma = req.prisma || (await import('@prisma/client')).PrismaClient;
+    const client = req.prisma || new prisma();
+    const updated = await client.user.update({
+      where: { id: userId },
+      data: { preferences: body },
+    });
+    return updated.preferences;
+  }
 }

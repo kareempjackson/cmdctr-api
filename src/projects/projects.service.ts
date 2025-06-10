@@ -231,9 +231,16 @@ export class ProjectsService {
 
     const canvas = await this.prisma.canvas.create({
       data: {
-        ...dto,
-        createdBy: userId,
+        name: dto.name,
+        projectId: dto.projectId,
+        type: dto.type,
+        description: dto.description,
         config: dto.config || {},
+        aiContext: dto.aiContext,
+        layout: dto.layout,
+        isTemplate: dto.isTemplate,
+        isPublic: dto.isPublic,
+        createdBy: userId,
       },
       include: {
         blocks: {

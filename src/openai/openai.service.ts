@@ -50,4 +50,19 @@ Return a JSON object with keys: systemPrompt, capabilities (array), roleAssumpti
     });
     return response.data[0].embedding;
   }
+
+  async chatCompletion(params: {
+    model: string;
+    messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
+    max_tokens?: number;
+    temperature?: number;
+  }): Promise<string> {
+    const completion = await this.openai.chat.completions.create({
+      model: params.model,
+      messages: params.messages,
+      max_tokens: params.max_tokens,
+      temperature: params.temperature,
+    });
+    return completion.choices[0]?.message?.content || '';
+  }
 }

@@ -12,6 +12,8 @@ import { ConfigService } from '../config/config.service';
 import { Request } from 'express';
 import { randomBytes } from 'crypto';
 import * as postmark from 'postmark';
+import * as speakeasy from 'speakeasy';
+import * as qrcode from 'qrcode';
 
 @Injectable()
 export class AuthService {
@@ -120,6 +122,11 @@ export class AuthService {
         verified: true,
         createdAt: true,
         updatedAt: true,
+        username: true,
+        bio: true,
+        linkedin: true,
+        twitter: true,
+        avatar: true,
       },
     });
     
@@ -192,12 +199,17 @@ export class AuthService {
       verified: user?.verified ?? false,
       createdAt: user?.createdAt || new Date(0),
       updatedAt: user?.updatedAt || new Date(0),
+      username: user?.username || '',
+      bio: user?.bio || '',
+      linkedin: user?.linkedin || '',
+      twitter: user?.twitter || '',
+      avatar: user?.avatar || null,
       workspaces,
       currentWorkspaceId,
     };
   }
 
-  async updateMe(userId: string, updateData: { name?: string; email?: string; avatar?: string }) {
+  async updateMe(userId: string, updateData: { name?: string; email?: string; avatar?: string; username?: string; bio?: string; linkedin?: string; twitter?: string }) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
       throw new BadRequestException('User not found');
@@ -219,7 +231,11 @@ export class AuthService {
       data: {
         name: updateData.name,
         email: updateData.email,
-        // Note: avatar field would need to be added to the User model if needed
+        avatar: updateData.avatar,
+        username: updateData.username,
+        bio: updateData.bio,
+        linkedin: updateData.linkedin,
+        twitter: updateData.twitter,
       },
     });
   }
@@ -252,5 +268,42 @@ export class AuthService {
     });
     await this.sendVerificationEmail(user.email, verificationToken);
     return { message: 'Verification email resent. Please check your inbox.' };
+  }
+
+  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new BadRequestException('User not found');
+    const valid = await bcrypt.compare(currentPassword, user.password);
+    if (!valid) throw new BadRequestException('Current password is incorrect');
+    const hash = await bcrypt.hash(newPassword, 10);
+    await this.prisma.user.update({ where: { id: userId }, data: { password: hash } });
+  }
+
+  async setup2FA(userId: string) {
+    // Generate a secret
+    const secret = speakeasy.generateSecret({ length: 20, name: `Cmdctr (${userId})` });
+    // Save secret temp to user (not enabled yet)
+    await this.prisma.user.update({ where: { id: userId }, data: { twoFASecret: secret.base32, twoFAEnabled: false } });
+    // Generate QR code
+    const otpauthUrl = secret.otpauth_url!;
+    const qrCodeUrl = await qrcode.toDataURL(otpauthUrl);
+    return { qrCodeUrl, secret: secret.base32 };
+  }
+
+  async verify2FA(userId: string, code: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user?.twoFASecret) throw new BadRequestException('2FA not set up');
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFASecret,
+      encoding: 'base32',
+      token: code,
+      window: 1,
+    });
+    if (!verified) throw new BadRequestException('Invalid 2FA code');
+    await this.prisma.user.update({ where: { id: userId }, data: { twoFAEnabled: true } });
+  }
+
+  async disable2FA(userId: string) {
+    await this.prisma.user.update({ where: { id: userId }, data: { twoFAEnabled: false, twoFASecret: null } });
   }
 }

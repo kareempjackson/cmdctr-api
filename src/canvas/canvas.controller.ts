@@ -36,6 +36,9 @@ export class CreateCanvasFromPromptDto {
   @IsOptional()
   @IsString()
   description?: string;
+
+  @IsOptional()
+  deterministic?: boolean;
 }
 
 export class AddBlockDto {
@@ -92,6 +95,7 @@ export class CanvasController {
     const interpretation = await this.promptService.interpretPrompt(
       dto.prompt,
       dto.workspaceId,
+      { deterministic: dto.deterministic }
     );
 
     console.log('Prompt interpretation result:', interpretation);

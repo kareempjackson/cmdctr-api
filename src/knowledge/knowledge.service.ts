@@ -19,12 +19,15 @@ import {
   TrainingStatus,
   AccessLevel,
 } from './dto/knowledge.dto';
+import { InjectQueue } from '@nestjs/bull';
+import { Queue } from 'bull';
 
 @Injectable()
 export class KnowledgeService {
   constructor(
     private prisma: PrismaService,
     private activityService: ActivityService,
+    @InjectQueue('agent-training') private agentTrainingQueue: Queue,
   ) {}
 
   async createEntry(
@@ -44,6 +47,10 @@ export class KnowledgeService {
         description: createDto.description,
         content: createDto.content,
         status: createDto.status || KnowledgeEntryStatus.DRAFT,
+        fileUrl: createDto.fileUrl,
+        fileName: createDto.fileName,
+        fileSize: createDto.fileSize,
+        mimeType: createDto.mimeType,
       },
       include: this.getIncludeOptions(),
     });
@@ -58,6 +65,16 @@ export class KnowledgeService {
       await this.updateAgentAccess(entry.id, workspaceId, {
         agentIds: createDto.agentIds,
         accessLevel: AccessLevel.READ,
+      });
+    }
+
+    // After creating the entry, enqueue training jobs for all agents in the workspace (async)
+    const agents = await this.prisma.agent.findMany({ where: { workspaceId } });
+    for (const agent of agents) {
+      this.agentTrainingQueue.add('train-agent-on-knowledge', {
+        agentId: agent.id,
+        knowledgeEntryId: entry.id,
+        workspaceId,
       });
     }
 

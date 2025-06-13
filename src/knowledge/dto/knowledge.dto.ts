@@ -55,6 +55,23 @@ export class CreateKnowledgeEntryDto {
   @IsArray()
   @IsUUID(4, { each: true })
   agentIds?: string[];
+
+  // S3 file metadata
+  @IsOptional()
+  @IsString()
+  fileUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  fileName?: string;
+
+  @IsOptional()
+  @IsInt()
+  fileSize?: number;
+
+  @IsOptional()
+  @IsString()
+  mimeType?: string;
 }
 
 export class UpdateKnowledgeEntryDto {
@@ -83,6 +100,23 @@ export class UpdateKnowledgeEntryDto {
   @IsArray()
   @IsUUID(4, { each: true })
   agentIds?: string[];
+
+  // S3 file metadata
+  @IsOptional()
+  @IsString()
+  fileUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  fileName?: string;
+
+  @IsOptional()
+  @IsInt()
+  fileSize?: number;
+
+  @IsOptional()
+  @IsString()
+  mimeType?: string;
 }
 
 export class KnowledgeQueryDto {

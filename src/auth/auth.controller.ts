@@ -8,6 +8,7 @@ import {
   Query,
   Res,
   Patch,
+  ForbiddenException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import {
@@ -215,5 +216,38 @@ export class AuthController {
       data: { preferences: body },
     });
     return updated.preferences;
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('change-password')
+  async changePassword(@Req() req: any, @Body() body: { currentPassword: string; newPassword: string }) {
+    const userId = req.user.userId;
+    if (!body.currentPassword || !body.newPassword) throw new ForbiddenException('Missing password fields');
+    await this.authService.changePassword(userId, body.currentPassword, body.newPassword);
+    return { message: 'Password changed successfully' };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('2fa/setup')
+  async setup2FA(@Req() req: any) {
+    const userId = req.user.userId;
+    return this.authService.setup2FA(userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('2fa/verify')
+  async verify2FA(@Req() req: any, @Body() body: { code: string }) {
+    const userId = req.user.userId;
+    if (!body.code) throw new ForbiddenException('Missing 2FA code');
+    await this.authService.verify2FA(userId, body.code);
+    return { message: '2FA enabled' };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('2fa/disable')
+  async disable2FA(@Req() req: any) {
+    const userId = req.user.userId;
+    await this.authService.disable2FA(userId);
+    return { message: '2FA disabled' };
   }
 }

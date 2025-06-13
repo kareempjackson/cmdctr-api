@@ -6,9 +6,19 @@ import { VectorModule } from '../vector/vector.module';
 import { OpenaiModule } from '../openai/openai.module';
 import { ActivityModule } from '../activity/activity.module';
 import { KnowledgeModule } from '../knowledge/knowledge.module';
+import { BullModule } from '@nestjs/bull';
 
 @Module({
-  imports: [PrismaModule, VectorModule, OpenaiModule, ActivityModule, KnowledgeModule],
+  imports: [
+    BullModule.registerQueue({
+      name: 'agent-training',
+    }),
+    PrismaModule,
+    VectorModule,
+    OpenaiModule,
+    ActivityModule,
+    KnowledgeModule,
+  ],
   providers: [AgentsService],
   controllers: [AgentsController],
   exports: [AgentsService],

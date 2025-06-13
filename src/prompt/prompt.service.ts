@@ -4,6 +4,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { LLMChain } from 'langchain/chains';
 import { ConfigService } from '../config/config.service';
+import { v4 as uuidv4 } from 'uuid';
 
 export interface BlockInstruction {
   type: string;
@@ -37,7 +38,12 @@ export class PromptService {
   async interpretPrompt(
     prompt: string,
     workspaceId: string,
+    opts?: { deterministic?: boolean }
   ): Promise<InterpretPromptResponse> {
+    if (opts?.deterministic) {
+      // Use rule-based parser
+      return this.ruleBasedParse(prompt);
+    }
     const promptTemplate = PromptTemplate.fromTemplate(`
 You are an AI assistant that helps users build workspace dashboards by interpreting their natural language requests.
 
@@ -260,6 +266,121 @@ Available block types: text, table, chart, task-list, kanban, calendar, timeline
     } catch (error) {
       console.error('Error generating block suggestions:', error);
       return [];
+    }
+  }
+
+  private ruleBasedParse(prompt: string): InterpretPromptResponse {
+    const layoutType = this.detectLayoutType(prompt);
+    const blocks = this.buildBlocksForLayout(layoutType, prompt);
+    return {
+      intent: `Rule-based: ${layoutType} layout`,
+      blocks,
+    };
+  }
+
+  private detectLayoutType(prompt: string): string {
+    const p = prompt.toLowerCase();
+    if (p.includes('crm')) return 'crm';
+    if (p.includes('project')) return 'project';
+    if (p.includes('calendar')) return 'calendar';
+    if (p.includes('analytics') || p.includes('chart')) return 'analytics';
+    if (p.includes('finance')) return 'finance';
+    if (p.includes('note')) return 'notes';
+    if (p.includes('form')) return 'form';
+    if (p.includes('timeline')) return 'timeline';
+    if (p.includes('kanban')) return 'kanban';
+    return 'dashboard';
+  }
+
+  private buildBlocksForLayout(type: string, prompt: string): BlockInstruction[] {
+    switch (type) {
+      case 'crm':
+        return [
+          { type: 'crm', title: 'CRM Board', config: {}, data: {}, position: 0 },
+          { type: 'kanban', title: 'Sales Pipeline', config: { columns: [ { title: 'New' }, { title: 'Contacted' }, { title: 'Negotiation' }, { title: 'Won' }, { title: 'Lost' } ] }, data: { cards: [ { id: '1', title: 'Acme Inc', column: 'New', value: '$5,000' }, { id: '2', title: 'Globex', column: 'Contacted', value: '$3,200' } ] }, position: 1 },
+          { type: 'table', title: 'Leads Table', config: { columns: [ { key: 'name', label: 'Name', type: 'text' }, { key: 'stage', label: 'Stage', type: 'text' }, { key: 'value', label: 'Value', type: 'text' }, { key: 'contact', label: 'Contact', type: 'text' } ] }, data: { rows: [ { name: 'Acme Inc', stage: 'New', value: '$5,000', contact: 'Jane Smith' }, { name: 'Globex', stage: 'Contacted', value: '$3,200', contact: 'Tom Cruise' } ] }, position: 2 },
+          { type: 'chart', title: 'Deals by Stage', config: { type: 'bar', xKey: 'stage', yKey: 'count' }, data: { rows: [ { stage: 'New', count: 4 }, { stage: 'Contacted', count: 3 }, { stage: 'Won', count: 1 } ] }, position: 3 },
+        ];
+      case 'project':
+        return [
+          { type: 'project', title: 'Project Dashboard', config: {}, data: {}, position: 0 },
+          { type: 'kanban', title: 'Project Tasks', config: { columns: [ { title: 'Backlog' }, { title: 'In Progress' }, { title: 'Review' }, { title: 'Done' } ] }, data: { cards: [ { id: '1', title: 'Design UI', column: 'Backlog' }, { id: '2', title: 'API Integration', column: 'In Progress' } ] }, position: 1 },
+          { type: 'timeline', title: 'Project Timeline', config: {}, data: { events: [ { title: 'Kickoff', date: '2024-06-01' }, { title: 'Launch', date: '2024-07-01' } ] }, position: 2 },
+        ];
+      case 'calendar':
+        return [
+          { type: 'calendar', title: 'Team Calendar', config: {}, data: { events: [ { title: 'Sprint Planning', date: '2024-06-10' }, { title: 'Demo Day', date: '2024-06-20' } ] }, position: 0 },
+        ];
+      case 'analytics':
+        return [
+          { type: 'analytics', title: 'Executive Analytics', config: {}, data: {}, position: 0 },
+          { type: 'chart', title: 'Website Traffic', config: { type: 'line', xKey: 'date', yKey: 'visits' }, data: { rows: [ { date: '2024-06-01', visits: 120 }, { date: '2024-06-02', visits: 150 } ] }, position: 1 },
+          { type: 'table', title: 'Top Pages', config: { columns: [ { key: 'page', label: 'Page', type: 'text' }, { key: 'views', label: 'Views', type: 'number' } ] }, data: { rows: [ { page: '/home', views: 1000 }, { page: '/pricing', views: 800 } ] }, position: 2 },
+        ];
+      case 'finance':
+        return [
+          { type: 'finance', title: 'Finance Hub', config: {}, data: {}, position: 0 },
+          { type: 'chart', title: 'Revenue Over Time', config: { type: 'bar', xKey: 'month', yKey: 'revenue' }, data: { rows: [ { month: 'Jan', revenue: 10000 }, { month: 'Feb', revenue: 12000 } ] }, position: 1 },
+          { type: 'table', title: 'Expenses', config: { columns: [ { key: 'category', label: 'Category', type: 'text' }, { key: 'amount', label: 'Amount', type: 'text' } ] }, data: { rows: [ { category: 'Salaries', amount: '$8,000' }, { category: 'Marketing', amount: '$2,000' } ] }, position: 2 },
+        ];
+      case 'hr':
+        return [
+          { type: 'hr', title: 'HR Workspace', config: {}, data: {}, position: 0 },
+          { type: 'table', title: 'Employee Directory', config: { columns: [ { key: 'name', label: 'Name', type: 'text' }, { key: 'role', label: 'Role', type: 'text' }, { key: 'status', label: 'Status', type: 'text' } ] }, data: { rows: [ { name: 'Sarah Chen', role: 'Designer', status: 'Active' }, { name: 'Alex Rivera', role: 'Developer', status: 'Away' } ] }, position: 1 },
+        ];
+      case 'revenue':
+        return [
+          { type: 'revenue', title: 'Revenue Forecast', config: {}, data: {}, position: 0 },
+          { type: 'chart', title: 'Revenue Growth', config: { type: 'line', xKey: 'month', yKey: 'revenue' }, data: { rows: [ { month: 'Jan', revenue: 10000 }, { month: 'Feb', revenue: 12000 } ] }, position: 1 },
+        ];
+      case 'agent':
+        return [
+          { type: 'agent', title: 'Agent Activity Feed', config: {}, data: {}, position: 0 },
+        ];
+      case 'marketing':
+        return [
+          { type: 'marketing', title: 'Marketing Dashboard', config: {}, data: {}, position: 0 },
+        ];
+      case 'sales':
+        return [
+          { type: 'sales', title: 'Sales Pipeline Tracker', config: {}, data: {}, position: 0 },
+        ];
+      case 'support':
+        return [
+          { type: 'support', title: 'Customer Support Inbox', config: {}, data: {}, position: 0 },
+        ];
+      case 'product':
+        return [
+          { type: 'product', title: 'Product Management Hub', config: {}, data: {}, position: 0 },
+        ];
+      case 'timeline':
+        return [
+          { type: 'timeline', title: 'Project Timeline', config: {}, data: { events: [ { title: 'Kickoff', date: '2024-06-01' }, { title: 'Launch', date: '2024-07-01' } ] }, position: 0 },
+        ];
+      case 'kanban':
+        return [
+          { type: 'kanban', title: 'Kanban Board', config: { columns: [ { title: 'Todo' }, { title: 'Doing' }, { title: 'Done' } ] }, data: { cards: [ { id: '1', title: 'Design', column: 'Todo' }, { id: '2', title: 'Build', column: 'Doing' } ] }, position: 0 },
+        ];
+      case 'task-list':
+        return [
+          { type: 'task-list', title: 'Task List', config: {}, data: { tasks: [ { id: '1', text: 'First Task', completed: false }, { id: '2', text: 'Second Task', completed: true } ] }, position: 0 },
+        ];
+      case 'status':
+        return [
+          { type: 'status', title: 'Status Block', config: {}, data: { status: 'Active' }, position: 0 },
+        ];
+      case 'notes':
+        return [
+          { type: 'note', title: 'Quick Notes', config: {}, data: { text: 'Remember to follow up with Acme Inc.' }, position: 0 },
+        ];
+      case 'text':
+        return [
+          { type: 'text', title: 'Text Block', config: { markdown: true }, data: { content: 'This is a text block.' }, position: 0 },
+        ];
+      default:
+        return [
+          { type: 'text', title: 'Welcome', config: { markdown: true }, data: { content: 'This is your smart canvas. Start building!' }, position: 0 },
+        ];
     }
   }
 } 

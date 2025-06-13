@@ -55,4 +55,24 @@ export class WeaviateService {
       .withProperties({ input, output, embedding, timestamp, metadata: JSON.stringify(metadata) })
       .do();
   }
+
+  async listAllMemories(agentId: string) {
+    const className = `AgentMemory_${agentId.replace(/-/g, '')}`;
+    try {
+      const result = await this.client.graphql.get()
+        .withClassName(className)
+        .withFields('input output timestamp metadata')
+        .withLimit(100)
+        .do();
+      const memories = result?.data?.Get?.[className] || [];
+      console.log(`[Weaviate][${agentId}] Listing all memories (${memories.length}):`);
+      for (const [i, mem] of memories.entries()) {
+        console.log(`  Memory ${i + 1}: input="${mem.input?.slice(0, 80)}...", output="${mem.output?.slice(0, 40)}...", metadata=${mem.metadata}`);
+      }
+      return memories;
+    } catch (err) {
+      console.error(`[Weaviate][${agentId}] Error listing memories:`, err);
+      return [];
+    }
+  }
 }

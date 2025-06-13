@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Body, Param, Query, Req, UseGuards, UseInterceptors, UploadedFile, Delete, Res } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Body, Param, Query, Req, UseGuards, UseInterceptors, UploadedFile, Delete, Res, Request } from '@nestjs/common';
 import { AgentsService } from './agents.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateAgentDto } from './dto/create-agent.dto';
@@ -10,6 +10,8 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiParam, ApiQuery } from '@nestjs/swagger';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 @ApiTags('agents')
 @Controller('agents')
@@ -89,21 +91,6 @@ export class AgentsController {
   @ApiOperation({ summary: 'Upload training file for agent' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 201, description: 'File uploaded' })
-  @UseInterceptors(FileInterceptor('file', {
-    storage: diskStorage({}), // We'll handle saving manually in the service
-    fileFilter: (req, file, cb) => {
-      const allowedTypes = ['application/pdf', 'text/markdown', 'text/plain', 'text/csv'];
-      const allowedExtensions = ['.pdf', '.md', '.txt', '.csv'];
-      
-      if (allowedTypes.includes(file.mimetype) || 
-          allowedExtensions.some(ext => file.originalname.toLowerCase().endsWith(ext))) {
-        cb(null, true);
-      } else {
-        return cb(new Error('Only PDF, Markdown, TXT, and CSV files are allowed'), false);
-      }
-    },
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
-  }))
   @Post(':id/files')
   async uploadTrainingFile(
     @Param('id') id: string,
@@ -323,5 +310,79 @@ export class AgentsController {
   ) {
     const userId = req.user.userId;
     return this.agentsService.getAgentKnowledgeAccess(id, userId);
+  }
+
+  // S3 Presigned URL for Agent Training File Upload
+  @Post(':id/training-files/presigned-upload-url')
+  async getAgentTrainingPresignedUrl(
+    @Param('id') agentId: string,
+    @Request() req: any,
+    @Body() body: { fileType: string; fileName: string }
+  ) {
+    // (Optional: check user permissions here)
+    const s3 = new S3Client({
+      region: process.env.AWS_REGION,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+      },
+    });
+    const Bucket = process.env.AWS_S3_BUCKET!;
+    const Key = `agent-training/${agentId}/${Date.now()}-${Math.random().toString(36).slice(2)}-${body.fileName}`;
+    const command = new PutObjectCommand({
+      Bucket,
+      Key,
+      ContentType: body.fileType,
+    });
+    const url = await getSignedUrl(s3, command, { expiresIn: 600 });
+    return { url, key: Key, publicUrl: `https://${Bucket}.s3.amazonaws.com/${Key}` };
+  }
+
+  // Save Agent Training File Metadata after S3 upload
+  @Post(':id/training-files/upload')
+  async uploadAgentTrainingFileMetadata(
+    @Param('id') agentId: string,
+    @Request() req: any,
+    @Body() metadata: { fileUrl: string; fileName: string; fileSize: number; mimeType: string }
+  ) {
+    const userId = req.user.userId;
+    return this.agentsService.saveTrainingFileMetadata(agentId, metadata, userId);
+  }
+
+  // Secure download endpoint for agent training files
+  @Get(':agentId/training-files/:fileId/download')
+  async downloadAgentTrainingFile(
+    @Param('agentId') agentId: string,
+    @Param('fileId') fileId: string,
+    @Request() req: any,
+    @Res() res: Response,
+    @Query('inline') inline: string,
+  ) {
+    const userId = req.user.userId;
+    const file = await this.agentsService.downloadTrainingFile(agentId, fileId, userId);
+    // file.storagePath is the S3 URL
+    const Bucket = process.env.AWS_S3_BUCKET!;
+    // Extract S3 key from URL (remove https://.../)
+    let Key = file.storagePath;
+    if (Key.startsWith('https://')) {
+      Key = Key.split('.amazonaws.com/')[1];
+    }
+    const s3 = new S3Client({
+      region: process.env.AWS_REGION,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+      },
+    });
+    const command = new GetObjectCommand({ Bucket, Key });
+    try {
+      const s3res = await s3.send(command);
+      res.setHeader('Content-Type', s3res.ContentType || file.fileType || 'application/octet-stream');
+      const dispositionType = inline === '1' ? 'inline' : 'attachment';
+      res.setHeader('Content-Disposition', `${dispositionType}; filename="${file.fileName}"`);
+      (s3res.Body as any).pipe(res);
+    } catch (err) {
+      res.status(404).json({ error: 'File not found' });
+    }
   }
 }

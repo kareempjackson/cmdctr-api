@@ -3,9 +3,16 @@ import { KnowledgeController } from './knowledge.controller';
 import { KnowledgeService } from './knowledge.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ActivityModule } from '../activity/activity.module';
+import { BullModule } from '@nestjs/bull';
 
 @Module({
-  imports: [PrismaModule, ActivityModule],
+  imports: [
+    BullModule.registerQueue({
+      name: 'agent-training',
+    }),
+    PrismaModule,
+    ActivityModule,
+  ],
   controllers: [KnowledgeController],
   providers: [KnowledgeService],
   exports: [KnowledgeService],

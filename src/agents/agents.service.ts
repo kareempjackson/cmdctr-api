@@ -12,6 +12,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { unlinkSync, existsSync } from 'fs';
 const pdfParse = require('pdf-parse');
+import { Processor, Process } from '@nestjs/bull';
+import { Job } from 'bull';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 
 @Injectable()
 export class AgentsService {
@@ -147,13 +150,21 @@ export class AgentsService {
     try {
       // 2. Generate embedding for user input
       const inputEmbedding = await this.openai.generateEmbedding(dto.input.trim());
+      console.log(`[Agent][${agentId}] Input embedding length: ${inputEmbedding.length}`);
 
       // 3. Retrieve relevant memory from Weaviate
       const relevantMemories = await this.weaviate.searchMemory(agentId, inputEmbedding, 5);
+      console.log(`[Agent][${agentId}] Weaviate search returned ${relevantMemories.length} results.`);
+      for (const [i, mem] of relevantMemories.entries()) {
+        console.log(`[Agent][${agentId}] Memory ${i + 1}: input="${mem.input?.slice(0, 80)}...", output="${mem.output?.slice(0, 40)}...", metadata=${mem.metadata}`);
+      }
+
+      // After retrieving relevantMemories, log all memories in Weaviate for this agent
+      await this.weaviate.listAllMemories(agentId);
 
       // 4. Retrieve relevant knowledge base entries
       const knowledgeEntries = await this.getRelevantKnowledgeEntries(agentId, dto.input, userId);
-      console.log(`Found ${knowledgeEntries.length} relevant knowledge entries for agent execution`);
+      console.log(`[Agent][${agentId}] Found ${knowledgeEntries.length} relevant knowledge entries for agent execution`);
 
       // 5. Build context from memory and knowledge base
       let memoryContext = '';
@@ -163,25 +174,15 @@ export class AgentsService {
           memoryContext += `\n- Q: ${mem.input}\n  A: ${mem.output}`;
         }
       }
-
       let knowledgeContext = '';
       if (knowledgeEntries.length > 0) {
-        knowledgeContext = '\nRelevant knowledge base entries:';
+        knowledgeContext = '\nRelevant knowledge base:';
         for (const entry of knowledgeEntries) {
-          knowledgeContext += `\n- Title: ${entry.title}`;
-          if (entry.description) {
-            knowledgeContext += `\n  Description: ${entry.description}`;
-          }
-          if (entry.content) {
-            // Limit content length to avoid token overflow
-            const truncatedContent = entry.content.length > 500 
-              ? entry.content.substring(0, 500) + '...' 
-              : entry.content;
-            knowledgeContext += `\n  Content: ${truncatedContent}`;
-          }
-          knowledgeContext += '\n';
+          knowledgeContext += `\n- ${entry.title}: ${entry.description}`;
         }
       }
+      const fullContext = memoryContext + knowledgeContext;
+      console.log(`[Agent][${agentId}] Full context sent to OpenAI:\n${fullContext.slice(0, 1000)}...`);
 
       // 6. Build system prompt with agent purpose, memory, and knowledge
       let systemPrompt = '';
@@ -342,13 +343,38 @@ export class AgentsService {
     }
   }
 
-  private async extractTextFromFile(filePath: string, type: string): Promise<string> {
+  private async extractTextFromFile(filePathOrUrl: string, type: string): Promise<string> {
+    let dataBuffer: Buffer;
+    if (filePathOrUrl.startsWith('http')) {
+      // Download from S3
+      const match = filePathOrUrl.match(/https:\/\/([^\.]+)\.s3\.amazonaws\.com\/(.+)/);
+      if (!match) throw new Error('Invalid S3 URL');
+      const Bucket = match[1];
+      const Key = match[2];
+      console.log(`[S3] Downloading file from S3: Bucket=${Bucket}, Key=${Key}`);
+      const s3 = new S3Client({
+        region: process.env.AWS_REGION,
+        credentials: {
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+        },
+      });
+      const command = new GetObjectCommand({ Bucket, Key });
+      const { Body } = await s3.send(command);
+      if (!Body) throw new Error('S3 file Body is undefined');
+      dataBuffer = Buffer.from(await Body.transformToByteArray());
+      console.log(`[S3] Downloaded file size: ${dataBuffer.length} bytes`);
+    } else {
+      dataBuffer = fs.readFileSync(filePathOrUrl);
+    }
     if (type === 'pdf') {
-      const dataBuffer = fs.readFileSync(filePath);
       const data = await pdfParse(dataBuffer);
+      console.log(`[Extract] Extracted PDF text length: ${data.text.length}`);
       return data.text;
     } else if (type === 'md' || type === 'txt' || type === 'csv') {
-      return fs.readFileSync(filePath, 'utf-8');
+      const text = dataBuffer.toString('utf-8');
+      console.log(`[Extract] Extracted text (${type}) length: ${text.length}`);
+      return text;
     }
     throw new Error('Unsupported file type');
   }
@@ -1034,5 +1060,86 @@ export class AgentsService {
     );
 
     return { success: true, message: 'Agent knowledge access updated successfully' };
+  }
+
+  async trainAgentOnKnowledge(agentId: string, knowledgeEntryId: string, workspaceId: string) {
+    // TODO: Implement actual training logic here
+    // For now, just log
+    console.log(`[STUB] Training agent ${agentId} on knowledge entry ${knowledgeEntryId} in workspace ${workspaceId}`);
+  }
+
+  async saveTrainingFileMetadata(agentId: string, metadata: { fileUrl: string; fileName: string; fileSize: number; mimeType: string }, userId: string) {
+    // 1. Ensure user is a member of the agent's workspace
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const member = await this.prisma.workspaceMember.findFirst({
+      where: { userId, workspaceId: agent.workspaceId },
+    });
+    if (!member) throw new ForbiddenException('Not a member of this workspace');
+
+    // 2. Store file metadata in DB (set status to 'processing')
+    let trainingFile = await this.prisma.agentTrainingFile.create({
+      data: {
+        agentId,
+        fileName: metadata.fileName,
+        fileType: metadata.mimeType,
+        fileSize: metadata.fileSize,
+        storagePath: metadata.fileUrl, // S3 URL
+        status: 'processing',
+      },
+    });
+
+    try {
+      console.log(`[Train] Processing file for agent ${agentId}: fileId=${trainingFile.id}, fileName=${metadata.fileName}`);
+      let text = '';
+      if (metadata.mimeType === 'application/pdf') {
+        text = await this.extractTextFromFile(metadata.fileUrl, 'pdf');
+      } else if (metadata.mimeType === 'text/markdown' || metadata.fileName.endsWith('.md')) {
+        text = await this.extractTextFromFile(metadata.fileUrl, 'md');
+      } else if (metadata.mimeType === 'text/plain' || metadata.fileName.endsWith('.txt')) {
+        text = await this.extractTextFromFile(metadata.fileUrl, 'txt');
+      } else if (metadata.mimeType === 'text/csv' || metadata.fileName.endsWith('.csv')) {
+        text = await this.extractTextFromFile(metadata.fileUrl, 'csv');
+      } else {
+        throw new Error('Only PDF, Markdown, TXT, and CSV files are supported for now');
+      }
+      const chunks = text.split(/\n\n+/).filter(Boolean);
+      console.log(`[Train] File chunked into ${chunks.length} chunks.`);
+      for (const [i, chunk] of chunks.entries()) {
+        const embedding = await this.openai.generateEmbedding(chunk);
+        console.log(`[Embed] Chunk ${i + 1}/${chunks.length} (length: ${chunk.length}) embedding length: ${embedding.length}`);
+        await this.weaviate.storeMemory(
+          agentId,
+          chunk,
+          '[TRAINING FILE]',
+          embedding,
+          new Date().toISOString(),
+          { fileId: trainingFile.id, fileName: metadata.fileName },
+        );
+      }
+      await this.prisma.agentTrainingFile.update({ where: { id: trainingFile.id }, data: { status: 'ready' } });
+      console.log(`[Train] Finished processing file for agent ${agentId}: fileId=${trainingFile.id}`);
+      return { success: true, fileId: trainingFile.id };
+    } catch (err) {
+      await this.prisma.agentTrainingFile.update({ where: { id: trainingFile.id }, data: { status: 'error' } });
+      console.error(`[Train][Error] Failed processing file for agent ${agentId}: fileId=${trainingFile.id}, error:`, err);
+      throw err;
+    }
+  }
+}
+
+@Processor('agent-training')
+export class AgentTrainingProcessor {
+  constructor(private agentsService: AgentsService) {}
+
+  @Process('train-agent-on-knowledge')
+  async handleTrainAgentOnKnowledge(job: Job) {
+    const { agentId, knowledgeEntryId, workspaceId } = job.data;
+    try {
+      await this.agentsService.trainAgentOnKnowledge(agentId, knowledgeEntryId, workspaceId);
+      console.log(`Successfully trained agent ${agentId} on knowledge entry ${knowledgeEntryId}`);
+    } catch (err) {
+      console.error(`Failed to train agent ${agentId} on knowledge entry ${knowledgeEntryId}:`, err);
+    }
   }
 }

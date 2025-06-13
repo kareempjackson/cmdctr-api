@@ -13,6 +13,7 @@ import {
   HttpStatus,
   UploadedFile,
   UseInterceptors,
+  Res,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -31,6 +32,9 @@ import {
   TrainingHistoryDto,
   BulkOperationResultDto,
 } from './dto/knowledge.dto';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Response } from 'express';
 
 @Controller('knowledge')
 @UseGuards(JwtAuthGuard)
@@ -84,27 +88,53 @@ export class KnowledgeController {
     return this.knowledgeService.deleteEntry(entryId, req.user.id);
   }
 
-  // File Upload for Documents
+  // S3 Presigned URL for Knowledge File Upload
+  @Post('workspace/:workspaceId/entries/presigned-upload-url')
+  async getPresignedUploadUrl(
+    @Param('workspaceId') workspaceId: string,
+    @Request() req: any,
+    @Body() body: { fileType: string; fileName: string },
+  ) {
+    const s3 = new S3Client({
+      region: process.env.AWS_REGION,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+      },
+    });
+    const Bucket = process.env.AWS_S3_BUCKET!;
+    const Key = `knowledge/${workspaceId}/${Date.now()}-${Math.random().toString(36).slice(2)}-${body.fileName}`;
+    const command = new PutObjectCommand({
+      Bucket,
+      Key,
+      ContentType: body.fileType,
+    });
+    const url = await getSignedUrl(s3, command, { expiresIn: 600 });
+    return { url, key: Key, publicUrl: `https://${Bucket}.s3.amazonaws.com/${Key}` };
+  }
+
+  // File Upload for Documents (metadata only)
   @Post('workspace/:workspaceId/entries/upload')
-  @UseInterceptors(FileInterceptor('file'))
   async uploadDocument(
     @Param('workspaceId') workspaceId: string,
     @Request() req: any,
-    @UploadedFile() file: any,
-    @Body() metadata: { title?: string; description?: string; tags?: string },
+    @Body() metadata: { title?: string; description?: string; tags?: string; fileUrl: string; fileName: string; fileSize: number; mimeType: string },
   ): Promise<KnowledgeEntryResponseDto> {
+    console.log('uploadDocument req.user:', req.user);
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) throw new Error('User ID not found in request');
     const tags = metadata.tags ? metadata.tags.split(',').map(tag => tag.trim()) : [];
-    
     const createDto: CreateKnowledgeEntryDto = {
-      type: 'document' as any,
-      title: metadata.title || file.originalname,
+      type: 'file' as any,
+      title: metadata.title || metadata.fileName,
       description: metadata.description,
       tags,
+      fileUrl: metadata.fileUrl,
+      fileName: metadata.fileName,
+      fileSize: metadata.fileSize,
+      mimeType: metadata.mimeType,
     };
-
-    // TODO: Implement file storage logic (S3, local storage, etc.)
-    // For now, we'll create the entry without the file
-    return this.knowledgeService.createEntry(workspaceId, req.user.id, createDto);
+    return this.knowledgeService.createEntry(workspaceId, userId, createDto);
   }
 
   // Tags
@@ -177,5 +207,42 @@ export class KnowledgeController {
     
     const workspaceId = query.workspaceIds.split(',')[0];
     return this.knowledgeService.getEntries(workspaceId, req.user.id, query);
+  }
+
+  // Secure file download endpoint
+  @Get('workspace/:workspaceId/files/*key')
+  async downloadFile(
+    @Param('workspaceId') workspaceId: string,
+    @Param('key') key: string,
+    @Query('inline') inline: string,
+    @Request() req: any,
+    @Res() res: Response,
+  ) {
+    // Debug logging
+    console.log('Download endpoint hit');
+    console.log('Raw key param:', key);
+    const decodedKey = decodeURIComponent(key);
+    console.log('Decoded key:', decodedKey);
+    const Bucket = process.env.AWS_S3_BUCKET!;
+    console.log('S3 Bucket:', Bucket);
+    console.log('S3 Key:', decodedKey);
+    const s3 = new S3Client({
+      region: process.env.AWS_REGION,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+      },
+    });
+    const command = new GetObjectCommand({ Bucket, Key: decodedKey });
+    try {
+      const s3res = await s3.send(command);
+      res.setHeader('Content-Type', s3res.ContentType || 'application/octet-stream');
+      const dispositionType = inline === '1' ? 'inline' : 'attachment';
+      res.setHeader('Content-Disposition', `${dispositionType}; filename="${decodedKey.split('/').pop()}"`);
+      (s3res.Body as any).pipe(res);
+    } catch (err) {
+      console.error('S3 download error:', err);
+      res.status(404).json({ error: 'File not found' });
+    }
   }
 } 

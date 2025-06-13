@@ -40,6 +40,14 @@ model User {
     assistantMessages        AssistantMessage[]
     preferences              Json?
     usage                    Usage?
+    // Profile fields
+    username                 String?           @unique
+    bio                      String?
+    linkedin                 String?
+    twitter                  String?
+    avatar                   String?
+    twoFASecret              String?
+    twoFAEnabled             Boolean           @default(false)
 }
 
 model Workspace {

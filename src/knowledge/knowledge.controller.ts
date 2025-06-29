@@ -31,6 +31,7 @@ import {
   KnowledgeStatsDto,
   TrainingHistoryDto,
   BulkOperationResultDto,
+  KnowledgeEntryType,
 } from './dto/knowledge.dto';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -48,7 +49,7 @@ export class KnowledgeController {
     @Request() req: any,
     @Body() createDto: CreateKnowledgeEntryDto,
   ): Promise<KnowledgeEntryResponseDto> {
-    return this.knowledgeService.createEntry(workspaceId, req.user.id, createDto);
+    return this.knowledgeService.createEntry(workspaceId, req.user.userId, createDto);
   }
 
   @Get('workspace/:workspaceId/entries')
@@ -57,7 +58,7 @@ export class KnowledgeController {
     @Request() req: any,
     @Query() query: KnowledgeQueryDto,
   ): Promise<KnowledgeListResponseDto> {
-    return this.knowledgeService.getEntries(workspaceId, req.user.id, query);
+    return this.knowledgeService.getEntries(workspaceId, req.user.userId, query);
   }
 
   @Get('entries/:entryId')
@@ -76,7 +77,7 @@ export class KnowledgeController {
     @Request() req: any,
     @Body() updateDto: UpdateKnowledgeEntryDto,
   ): Promise<KnowledgeEntryResponseDto> {
-    return this.knowledgeService.updateEntry(entryId, req.user.id, updateDto);
+    return this.knowledgeService.updateEntry(entryId, req.user.userId, updateDto);
   }
 
   @Delete('entries/:entryId')
@@ -85,7 +86,7 @@ export class KnowledgeController {
     @Param('entryId') entryId: string,
     @Request() req: any,
   ): Promise<void> {
-    return this.knowledgeService.deleteEntry(entryId, req.user.id);
+    return this.knowledgeService.deleteEntry(entryId, req.user.userId);
   }
 
   // S3 Presigned URL for Knowledge File Upload
@@ -125,7 +126,7 @@ export class KnowledgeController {
     if (!userId) throw new Error('User ID not found in request');
     const tags = metadata.tags ? metadata.tags.split(',').map(tag => tag.trim()) : [];
     const createDto: CreateKnowledgeEntryDto = {
-      type: 'file' as any,
+      type: KnowledgeEntryType.DOCUMENT,
       title: metadata.title || metadata.fileName,
       description: metadata.description,
       tags,
@@ -143,7 +144,7 @@ export class KnowledgeController {
     @Param('workspaceId') workspaceId: string,
     @Request() req: any,
   ) {
-    return this.knowledgeService.getWorkspaceTags(workspaceId, req.user.id);
+    return this.knowledgeService.getWorkspaceTags(workspaceId, req.user.userId);
   }
 
   @Post('workspace/:workspaceId/tags')
@@ -152,7 +153,7 @@ export class KnowledgeController {
     @Request() req: any,
     @Body() createTagDto: CreateTagDto,
   ) {
-    return this.knowledgeService.createTag(workspaceId, req.user.id, createTagDto);
+    return this.knowledgeService.createTag(workspaceId, req.user.userId, createTagDto);
   }
 
   // Training
@@ -163,7 +164,7 @@ export class KnowledgeController {
     @Request() req: any,
     @Body() startTrainingDto: StartTrainingDto,
   ): Promise<void> {
-    return this.knowledgeService.startTraining(entryId, req.user.id, startTrainingDto);
+    return this.knowledgeService.startTraining(entryId, req.user.userId, startTrainingDto);
   }
 
   @Get('entries/:entryId/training/history')
@@ -171,7 +172,7 @@ export class KnowledgeController {
     @Param('entryId') entryId: string,
     @Request() req: any,
   ): Promise<TrainingHistoryDto[]> {
-    return this.knowledgeService.getTrainingHistory(entryId, req.user.id);
+    return this.knowledgeService.getTrainingHistory(entryId, req.user.userId);
   }
 
   // Bulk Operations
@@ -181,7 +182,7 @@ export class KnowledgeController {
     @Request() req: any,
     @Body() bulkDto: BulkOperationDto,
   ): Promise<BulkOperationResultDto> {
-    return this.knowledgeService.bulkOperation(workspaceId, req.user.id, bulkDto);
+    return this.knowledgeService.bulkOperation(workspaceId, req.user.userId, bulkDto);
   }
 
   // Statistics
@@ -190,7 +191,7 @@ export class KnowledgeController {
     @Param('workspaceId') workspaceId: string,
     @Request() req: any,
   ): Promise<KnowledgeStatsDto> {
-    return this.knowledgeService.getWorkspaceStats(workspaceId, req.user.id);
+    return this.knowledgeService.getWorkspaceStats(workspaceId, req.user.userId);
   }
 
   // Search across all accessible knowledge entries
@@ -206,7 +207,7 @@ export class KnowledgeController {
     }
     
     const workspaceId = query.workspaceIds.split(',')[0];
-    return this.knowledgeService.getEntries(workspaceId, req.user.id, query);
+    return this.knowledgeService.getEntries(workspaceId, req.user.userId, query);
   }
 
   // Secure file download endpoint
@@ -236,13 +237,13 @@ export class KnowledgeController {
     const command = new GetObjectCommand({ Bucket, Key: decodedKey });
     try {
       const s3res = await s3.send(command);
-      res.setHeader('Content-Type', s3res.ContentType || 'application/octet-stream');
+      (res as any).setHeader('Content-Type', s3res.ContentType || 'application/octet-stream');
       const dispositionType = inline === '1' ? 'inline' : 'attachment';
-      res.setHeader('Content-Disposition', `${dispositionType}; filename="${decodedKey.split('/').pop()}"`);
+      (res as any).setHeader('Content-Disposition', `${dispositionType}; filename="${decodedKey.split('/').pop()}"`);
       (s3res.Body as any).pipe(res);
     } catch (err) {
       console.error('S3 download error:', err);
-      res.status(404).json({ error: 'File not found' });
+      (res as any).status(404).json({ error: 'File not found' });
     }
   }
 } 

@@ -127,24 +127,6 @@ export class AgentsController {
     return this.agentsService.deleteTrainingFile(agentId, fileId, userId);
   }
 
-  @ApiOperation({ summary: 'Download training file' })
-  @ApiParam({ name: 'agentId' })
-  @ApiParam({ name: 'fileId' })
-  @ApiResponse({ status: 200, description: 'File download' })
-  @Get(':agentId/files/:fileId/download')
-  async downloadTrainingFile(
-    @Param('agentId') agentId: string,
-    @Param('fileId') fileId: string,
-    @Req() req: any,
-    @Res() res: Response,
-  ) {
-    const userId = req.user.userId;
-    const file = await this.agentsService.downloadTrainingFile(agentId, fileId, userId);
-    res.setHeader('Content-Type', file.fileType);
-    res.setHeader('Content-Disposition', `attachment; filename="${file.fileName}"`);
-    return res.sendFile(file.storagePath);
-  }
-
   // Memory Management Endpoints
   @ApiOperation({ summary: 'Get agent memory chunks' })
   @ApiParam({ name: 'id' })
@@ -167,13 +149,12 @@ export class AgentsController {
   @ApiBody({ type: SearchMemoryDto })
   @ApiResponse({ status: 200, description: 'Search results' })
   @Post(':id/memory/search')
-  async searchAgentMemory(
-    @Param('id') id: string,
+  async searchMemory(
+    @Param('id') agentId: string,
     @Body() dto: SearchMemoryDto,
-    @Req() req: any,
+    @Request() req: any,
   ) {
-    const userId = req.user.userId;
-    return this.agentsService.searchAgentMemory(id, dto.query, userId, dto.limit);
+    return this.agentsService.searchAgentMemory(agentId, dto.query, req.user.id, dto.limit);
   }
 
   @ApiOperation({ summary: 'Delete specific memory chunk' })
@@ -188,6 +169,25 @@ export class AgentsController {
   ) {
     const userId = req.user.userId;
     return this.agentsService.deleteAgentMemory(agentId, memoryId, userId);
+  }
+
+  @Post(':id/memory/summarize')
+  @ApiResponse({ status: 200, description: 'Memory summary generated' })
+  async summarizeMemory(
+    @Param('id') agentId: string,
+    @Request() req: any,
+  ) {
+    return this.agentsService.summarizeAgentMemory(agentId, req.user.id);
+  }
+
+  @Get(':id/memory/context')
+  @ApiResponse({ status: 200, description: 'Comprehensive memory context' })
+  async getMemoryContext(
+    @Param('id') agentId: string,
+    @Query('query') query: string,
+    @Request() req: any,
+  ) {
+    return this.agentsService.getAgentMemoryContext(agentId, query, req.user.id);
   }
 
   // File Retraining Endpoints
@@ -359,14 +359,21 @@ export class AgentsController {
     @Query('inline') inline: string,
   ) {
     const userId = req.user.userId;
+    console.log(`[Download] agentId=${agentId}, fileId=${fileId}`);
     const file = await this.agentsService.downloadTrainingFile(agentId, fileId, userId);
-    // file.storagePath is the S3 URL
+    console.log('[Download] File record from DB:', file);
+    if (!file) {
+      console.log('[Download] File record not found in DB');
+      return res.status(404).json({ error: 'File not found in DB' });
+    }
     const Bucket = process.env.AWS_S3_BUCKET!;
-    // Extract S3 key from URL (remove https://.../)
     let Key = file.storagePath;
     if (Key.startsWith('https://')) {
       Key = Key.split('.amazonaws.com/')[1];
     }
+    const decodedKey = decodeURIComponent(Key);
+    console.log(`[Download] S3 Bucket: ${Bucket}`);
+    console.log(`[Download] S3 Key: ${decodedKey}`);
     const s3 = new S3Client({
       region: process.env.AWS_REGION,
       credentials: {
@@ -374,7 +381,7 @@ export class AgentsController {
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
       },
     });
-    const command = new GetObjectCommand({ Bucket, Key });
+    const command = new GetObjectCommand({ Bucket, Key: decodedKey });
     try {
       const s3res = await s3.send(command);
       res.setHeader('Content-Type', s3res.ContentType || file.fileType || 'application/octet-stream');
@@ -382,7 +389,8 @@ export class AgentsController {
       res.setHeader('Content-Disposition', `${dispositionType}; filename="${file.fileName}"`);
       (s3res.Body as any).pipe(res);
     } catch (err) {
-      res.status(404).json({ error: 'File not found' });
+      console.error('[Download] S3 error:', err);
+      res.status(404).json({ error: 'File not found in S3', details: err?.message || err });
     }
   }
 }

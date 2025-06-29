@@ -8,6 +8,7 @@ import { OpenaiService } from '../openai/openai.service';
 import { WeaviateService } from '../vector/weaviate.service';
 import { ActivityService } from '../activity/activity.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
+import { ActionsService } from '../actions/actions.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { unlinkSync, existsSync } from 'fs';
@@ -15,6 +16,17 @@ const pdfParse = require('pdf-parse');
 import { Processor, Process } from '@nestjs/bull';
 import { Job } from 'bull';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { DocxLoader } from "@langchain/community/document_loaders/fs/docx";
+import { UnstructuredLoader } from "@langchain/community/document_loaders/fs/unstructured";
+import * as mammoth from "mammoth";
+import * as XLSX from "xlsx";
+import * as textract from "textract";
+import * as Tesseract from "tesseract.js";
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
+import * as PNG from 'pngjs';
+import { KnowledgeEntryStatus } from '../knowledge/dto/knowledge.dto';
+import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class AgentsService {
@@ -24,6 +36,7 @@ export class AgentsService {
     @Inject(WeaviateService) private readonly weaviate: WeaviateService,
     @Inject(ActivityService) private readonly activityService: ActivityService,
     @Inject(KnowledgeService) private readonly knowledgeService: KnowledgeService,
+    @Inject(ActionsService) private readonly actionsService: ActionsService,
   ) {}
 
   async getAgentsForUser(userId: string, page = 1, pageSize = 10) {
@@ -135,8 +148,7 @@ export class AgentsService {
 
   async executeAgent(agentId: string, dto: ExecuteAgentDto, userId: string) {
     const startTime = Date.now();
-    // Validate input
-    if (!dto.input || typeof dto.input !== 'string' || dto.input.trim().length === 0) {
+    if (!dto.input || dto.input.trim().length === 0) {
       throw new BadRequestException('Input is required and cannot be empty');
     }
     // 1. Ensure user is a member of the agent's workspace
@@ -148,32 +160,15 @@ export class AgentsService {
     if (!member) throw new ForbiddenException('Not a member of this workspace');
 
     try {
-      // 2. Generate embedding for user input
-      const inputEmbedding = await this.openai.generateEmbedding(dto.input.trim());
-      console.log(`[Agent][${agentId}] Input embedding length: ${inputEmbedding.length}`);
+      // 2. Build comprehensive memory context using the new method
+      const memoryContext = await this.weaviate.buildComprehensiveMemoryContext(agentId, dto.input);
+      console.log(`[Agent][${agentId}] Built comprehensive memory context (${memoryContext.length} chars)`);
 
-      // 3. Retrieve relevant memory from Weaviate
-      const relevantMemories = await this.weaviate.searchMemory(agentId, inputEmbedding, 5);
-      console.log(`[Agent][${agentId}] Weaviate search returned ${relevantMemories.length} results.`);
-      for (const [i, mem] of relevantMemories.entries()) {
-        console.log(`[Agent][${agentId}] Memory ${i + 1}: input="${mem.input?.slice(0, 80)}...", output="${mem.output?.slice(0, 40)}...", metadata=${mem.metadata}`);
-      }
-
-      // After retrieving relevantMemories, log all memories in Weaviate for this agent
-      await this.weaviate.listAllMemories(agentId);
-
-      // 4. Retrieve relevant knowledge base entries
+      // 3. Retrieve relevant knowledge base entries
       const knowledgeEntries = await this.getRelevantKnowledgeEntries(agentId, dto.input, userId);
       console.log(`[Agent][${agentId}] Found ${knowledgeEntries.length} relevant knowledge entries for agent execution`);
 
-      // 5. Build context from memory and knowledge base
-      let memoryContext = '';
-      if (relevantMemories.length > 0) {
-        memoryContext = '\nRelevant past interactions:';
-        for (const mem of relevantMemories) {
-          memoryContext += `\n- Q: ${mem.input}\n  A: ${mem.output}`;
-        }
-      }
+      // 4. Build knowledge context
       let knowledgeContext = '';
       if (knowledgeEntries.length > 0) {
         knowledgeContext = '\nRelevant knowledge base:';
@@ -181,26 +176,65 @@ export class AgentsService {
           knowledgeContext += `\n- ${entry.title}: ${entry.description}`;
         }
       }
-      const fullContext = memoryContext + knowledgeContext;
-      console.log(`[Agent][${agentId}] Full context sent to OpenAI:\n${fullContext.slice(0, 1000)}...`);
 
-      // 6. Build system prompt with agent purpose, memory, and knowledge
+      // 5. Get available actions if agent has action permissions
+      let actionsContext = '';
+      const config = agent.config as any;
+      if (config && config.capabilities && config.capabilities.includes('actions')) {
+        const availableActions = await this.actionsService.getAvailableActions();
+        actionsContext = '\nAvailable Actions:';
+        for (const action of availableActions) {
+          actionsContext += `\n- ${action.name}: ${action.description}`;
+          if (action.examples.length > 0) {
+            actionsContext += `\n  Example: ${action.examples[0]}`;
+          }
+        }
+      }
+
+      // 6. Build system prompt with agent purpose, memory, knowledge, and actions
+      let globalContext = '';
+      if (agent.workspaceId) {
+        const knowledgeList = await this.knowledgeService.getEntries(
+          agent.workspaceId,
+          userId,
+          { status: KnowledgeEntryStatus.PUBLISHED, limit: 100 }
+        );
+        if (knowledgeList.entries.length > 0) {
+          globalContext = '\nGlobal Knowledge Base Context:';
+          for (const entry of knowledgeList.entries) {
+            globalContext += `\n- ${entry.title}: ${entry.description || ''}`;
+            if (entry.content) {
+              globalContext += `\n  ${entry.content.substring(0, 500)}...`;
+            }
+          }
+        }
+      }
       let systemPrompt = '';
       if (agent.config && typeof agent.config === 'object' && 'systemPrompt' in agent.config) {
         systemPrompt = (agent.config as any).systemPrompt;
       } else {
         systemPrompt = agent.purpose || '';
       }
-      
-      // Add knowledge base context first (more authoritative)
+      // Add global knowledge base context first
+      if (globalContext) {
+        systemPrompt = `${systemPrompt}\n${globalContext}`;
+      }
+      // Add knowledge base context (agent-specific)
       if (knowledgeContext) {
         systemPrompt += knowledgeContext;
       }
-      
-      // Add memory context
+      // Add comprehensive memory context
       if (memoryContext) {
         systemPrompt += memoryContext;
       }
+      // Add actions context
+      if (actionsContext) {
+        systemPrompt += actionsContext;
+        systemPrompt += '\n\nYou can execute actions by responding with a JSON object containing an "action" field. For example: {"action": {"name": "http_request", "parameters": {"method": "GET", "url": "https://api.example.com/data"}}}';
+      }
+      
+      // Add detailed logging for context and user input
+      console.log(`[Agent][${agentId}]\n--- CONTEXT SENT TO LLM ---\nSystem Prompt: ${systemPrompt}\nMemory Context Length: ${memoryContext.length}\nKnowledge Context: ${knowledgeContext}\nActions Available: ${actionsContext ? 'Yes' : 'No'}\nUser Input: ${dto.input}\n--------------------------`);
 
       // 7. Use OpenAI to generate a response
       const completion = await this.openai['openai'].chat.completions.create({
@@ -210,53 +244,92 @@ export class AgentsService {
           { role: 'user', content: dto.input },
         ],
         temperature: 0.7,
-        max_tokens: 512,
+        max_tokens: 1024, // Increased for action responses
       });
       const output = completion.choices[0]?.message?.content || '';
 
-      // 8. Generate embedding for the response
-      const outputEmbedding = await this.openai.generateEmbedding(output);
+      // 8. Check if the response contains an action to execute
+      let actionResult: any = null;
+      let finalOutput = output;
+      
+      try {
+        // Try to parse the response as JSON to check for actions
+        const responseMatch = output.match(/\{[\s\S]*\}/);
+        if (responseMatch) {
+          const parsedResponse = JSON.parse(responseMatch[0]);
+          if (parsedResponse.action && typeof parsedResponse.action === 'object') {
+            console.log(`[Agent][${agentId}] Executing action: ${parsedResponse.action.name}`);
+            
+            // Execute the action
+            actionResult = await this.actionsService.executeAction({
+              actionName: parsedResponse.action.name,
+              parameters: parsedResponse.action.parameters || {},
+              agentId,
+              userId,
+              workspaceId: agent.workspaceId,
+            });
 
-      // 9. Store the interaction in Weaviate
+            // Update the output to include action results
+            if (actionResult && actionResult.success) {
+              finalOutput = `${output}\n\nAction executed successfully:\n${JSON.stringify(actionResult.data, null, 2)}`;
+            } else if (actionResult) {
+              finalOutput = `${output}\n\nAction failed: ${actionResult.error}`;
+            }
+          }
+        }
+      } catch (parseError) {
+        // Not a JSON response, use as-is
+        console.log(`[Agent][${agentId}] Response is not JSON, using as text`);
+      }
+
+      // 9. Generate embedding for the response
+      const outputEmbedding = await this.openai.generateEmbedding(finalOutput);
+
+      // 10. Store the interaction in Weaviate
       await this.weaviate.storeMemory(
         agentId,
         dto.input,
-        output,
+        finalOutput,
         outputEmbedding,
         new Date().toISOString(),
         { 
           ...dto.metadata || {},
           knowledgeEntriesUsed: knowledgeEntries.map(e => e.id),
+          actionExecuted: actionResult ? actionResult.metadata?.actionName : null,
+          actionSuccess: actionResult ? actionResult.success : null,
         },
       );
 
       const duration = Date.now() - startTime;
 
-      // 10. Log successful execution
+      // 11. Log successful execution
       await this.activityService.logAgentActivity(
         agentId,
         userId,
         'execute',
         {
           inputLength: dto.input.length,
-          outputLength: output.length,
-          memoriesUsed: relevantMemories.length,
+          outputLength: finalOutput.length,
+          memoryContextLength: memoryContext.length,
           knowledgeEntriesUsed: knowledgeEntries.length,
+          actionExecuted: actionResult ? actionResult.metadata?.actionName : null,
+          actionSuccess: actionResult ? actionResult.success : null,
           model: 'gpt-4-1106-preview',
         },
         duration,
       );
 
-      // 11. Return the response and context used
+      // 12. Return the response and context used
       return {
-        output,
-        memoryUsed: relevantMemories,
+        output: finalOutput,
+        memoryContextLength: memoryContext.length,
         knowledgeUsed: knowledgeEntries.map(entry => ({
           id: entry.id,
           title: entry.title,
           type: entry.type,
           description: entry.description,
         })),
+        actionResult,
       };
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -345,13 +418,13 @@ export class AgentsService {
 
   private async extractTextFromFile(filePathOrUrl: string, type: string): Promise<string> {
     let dataBuffer: Buffer;
+    let localPath = filePathOrUrl;
+    // Download from S3 if needed
     if (filePathOrUrl.startsWith('http')) {
-      // Download from S3
       const match = filePathOrUrl.match(/https:\/\/([^\.]+)\.s3\.amazonaws\.com\/(.+)/);
       if (!match) throw new Error('Invalid S3 URL');
       const Bucket = match[1];
       const Key = match[2];
-      console.log(`[S3] Downloading file from S3: Bucket=${Bucket}, Key=${Key}`);
       const s3 = new S3Client({
         region: process.env.AWS_REGION,
         credentials: {
@@ -363,18 +436,153 @@ export class AgentsService {
       const { Body } = await s3.send(command);
       if (!Body) throw new Error('S3 file Body is undefined');
       dataBuffer = Buffer.from(await Body.transformToByteArray());
-      console.log(`[S3] Downloaded file size: ${dataBuffer.length} bytes`);
+      // Save to temp file for loaders that require a path
+      const tmp = require('tmp');
+      const tmpFile = tmp.fileSync();
+      require('fs').writeFileSync(tmpFile.name, dataBuffer);
+      localPath = tmpFile.name;
     } else {
       dataBuffer = fs.readFileSync(filePathOrUrl);
     }
-    if (type === 'pdf') {
-      const data = await pdfParse(dataBuffer);
-      console.log(`[Extract] Extracted PDF text length: ${data.text.length}`);
-      return data.text;
-    } else if (type === 'md' || type === 'txt' || type === 'csv') {
-      const text = dataBuffer.toString('utf-8');
-      console.log(`[Extract] Extracted text (${type}) length: ${text.length}`);
+
+    // PDF
+    if (type === 'pdf' || type === 'pdfa') {
+      // Try LangChain PDFLoader first
+      let text = '';
+      try {
+        const loader = new PDFLoader(localPath);
+        const docs = await loader.load();
+        text = docs.map(d => d.pageContent).join('\n\n');
+      } catch (e) {
+        // fallback to pdf-parse
+        const data = await pdfParse(dataBuffer);
+        text = data.text;
+      }
+      // If text is empty or just watermark, try OCR
+      if (!text.trim() || text.trim().toLowerCase().includes('scanned by tapscanner')) {
+        try {
+          // Convert Buffer to Uint8Array for pdfjs-dist
+          const pdfData = dataBuffer instanceof Uint8Array ? dataBuffer : new Uint8Array(dataBuffer);
+          // Use pdfjs-dist to extract images from each page
+          const pdf = await pdfjsLib.getDocument({ data: pdfData }).promise;
+          let ocrText = '';
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const ops = await page.getOperatorList();
+            for (let j = 0; j < ops.fnArray.length; j++) {
+              if (ops.fnArray[j] === pdfjsLib.OPS.paintImageXObject) {
+                const imgName = ops.argsArray[j][0];
+                const img = await page.objs.get(imgName);
+                if (img && img.data) {
+                  // Convert image data to buffer
+                  const { width, height, data } = img;
+                  const png = require('pngjs').PNG;
+                  const pngImage = new png({ width, height });
+                  pngImage.data = Buffer.from(data);
+                  const buffer = PNG.sync.write(pngImage);
+                  const { data: { text: ocrResult } } = await Tesseract.recognize(buffer, 'eng');
+                  ocrText += ocrResult + '\n';
+                }
+              }
+            }
+          }
+          if (ocrText.trim()) {
+            text = ocrText;
+          }
+        } catch (ocrErr) {
+          console.error('[Extract][PDF][OCR] Error extracting OCR from scanned PDF:', ocrErr);
+        }
+      }
       return text;
+    }
+    // DOCX
+    if (type === 'docx' || type === 'doc') {
+      try {
+        const loader = new DocxLoader(localPath);
+        const docs = await loader.load();
+        return docs.map(d => d.pageContent).join('\n\n');
+      } catch (e) {
+        // fallback to mammoth
+        const { value } = await mammoth.extractRawText({ buffer: dataBuffer });
+        return value;
+      }
+    }
+    // XLS/XLSX
+    if (type === 'xls' || type === 'xlsx') {
+      try {
+        const workbook = XLSX.read(dataBuffer, { type: 'buffer' });
+        let text = '';
+        workbook.SheetNames.forEach(sheetName => {
+          const sheet = workbook.Sheets[sheetName];
+          const csv = XLSX.utils.sheet_to_csv(sheet);
+          text += `Sheet: ${sheetName}\n${csv}\n`;
+        });
+        return text;
+      } catch (e) {
+        // fallback to textract
+        return await new Promise((resolve, reject) => {
+          textract.fromBufferWithMime('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', dataBuffer, (err, text) => {
+            if (err) reject(err);
+            else resolve(text);
+          });
+        });
+      }
+    }
+    // PPT/PPTX
+    if (type === 'ppt' || type === 'pptx') {
+      try {
+        // Use textract for ppt/pptx
+        return await new Promise((resolve, reject) => {
+          textract.fromBufferWithMime('application/vnd.openxmlformats-officedocument.presentationml.presentation', dataBuffer, (err, text) => {
+            if (err) reject(err);
+            else resolve(text);
+          });
+        });
+      } catch (e) {
+        return '';
+      }
+    }
+    // Images (jpg, jpeg, png, gif, bmp, tiff)
+    if (["jpg", "jpeg", "png", "gif", "bmp", "tiff"].includes(type)) {
+      try {
+        // Use Tesseract directly for OCR
+        const { data: { text } } = await Tesseract.recognize(dataBuffer, 'eng');
+        return text;
+      } catch (e) {
+        return '';
+      }
+    }
+    // ODT
+    if (type === 'odt') {
+      try {
+        return await new Promise((resolve, reject) => {
+          textract.fromBufferWithMime('application/vnd.oasis.opendocument.text', dataBuffer, (err, text) => {
+            if (err) reject(err);
+            else resolve(text);
+          });
+        });
+      } catch (e) {
+        console.error('[Extract][ODT] Error extracting ODT:', e);
+        return '';
+      }
+    }
+    // RTF
+    if (type === 'rtf') {
+      try {
+        return await new Promise((resolve, reject) => {
+          textract.fromBufferWithMime('application/rtf', dataBuffer, (err, text) => {
+            if (err) reject(err);
+            else resolve(text);
+          });
+        });
+      } catch (e) {
+        console.error('[Extract][RTF] Error extracting RTF:', e);
+        return '';
+      }
+    }
+    // TXT, MD, CSV
+    if (["md", "txt", "csv"].includes(type)) {
+      return dataBuffer.toString('utf-8');
     }
     throw new Error('Unsupported file type');
   }
@@ -469,10 +677,6 @@ export class AgentsService {
   }
 
   async searchAgentMemory(agentId: string, query: string, userId: string, limit = 10) {
-    // Validate query input
-    if (!query || typeof query !== 'string' || query.trim().length === 0) {
-      throw new BadRequestException('Query is required and cannot be empty');
-    }
     // Ensure user is a member of the agent's workspace
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) throw new NotFoundException('Agent not found');
@@ -481,20 +685,35 @@ export class AgentsService {
     });
     if (!member) throw new ForbiddenException('Not a member of this workspace');
 
-    // Generate embedding for search query
-    const queryEmbedding = await this.openai.generateEmbedding(query.trim());
-    
-    // Search memory
+    const queryEmbedding = await this.openai.generateEmbedding(query);
     const memories = await this.weaviate.searchMemory(agentId, queryEmbedding, limit);
-    return {
-      query,
-      memories: memories.map(mem => ({
-        input: mem.input,
-        output: mem.output,
-        timestamp: mem.timestamp,
-        metadata: mem.metadata ? JSON.parse(mem.metadata) : {},
-      })),
-    };
+    return memories;
+  }
+
+  async summarizeAgentMemory(agentId: string, userId: string) {
+    // Ensure user is a member of the agent's workspace
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const member = await this.prisma.workspaceMember.findFirst({
+      where: { userId, workspaceId: agent.workspaceId },
+    });
+    if (!member) throw new ForbiddenException('Not a member of this workspace');
+
+    const summary = await this.weaviate.generateMemorySummary(agentId);
+    return { summary, agentId };
+  }
+
+  async getAgentMemoryContext(agentId: string, query: string, userId: string) {
+    // Ensure user is a member of the agent's workspace
+    const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const member = await this.prisma.workspaceMember.findFirst({
+      where: { userId, workspaceId: agent.workspaceId },
+    });
+    if (!member) throw new ForbiddenException('Not a member of this workspace');
+
+    const memoryContext = await this.weaviate.buildComprehensiveMemoryContext(agentId, query);
+    return { memoryContext, agentId, query };
   }
 
   async deleteAgentMemory(agentId: string, memoryId: string, userId: string) {

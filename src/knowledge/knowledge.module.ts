@@ -4,6 +4,8 @@ import { KnowledgeService } from './knowledge.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ActivityModule } from '../activity/activity.module';
 import { BullModule } from '@nestjs/bull';
+import { VectorModule } from '../vector/vector.module';
+import { OpenaiModule } from '../openai/openai.module';
 
 @Module({
   imports: [
@@ -12,6 +14,8 @@ import { BullModule } from '@nestjs/bull';
     }),
     PrismaModule,
     ActivityModule,
+    VectorModule,
+    OpenaiModule,
   ],
   controllers: [KnowledgeController],
   providers: [KnowledgeService],

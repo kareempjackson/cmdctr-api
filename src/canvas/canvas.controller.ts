@@ -95,10 +95,12 @@ export class CanvasController {
     const interpretation = await this.promptService.interpretPrompt(
       dto.prompt,
       dto.workspaceId,
-      { deterministic: dto.deterministic }
+      req.user.userId,
+      { deterministic: dto.deterministic === true ? true : false }
     );
 
     console.log('Prompt interpretation result:', interpretation);
+    console.log('Prompt interpretation blocks (stringified):', JSON.stringify(interpretation.blocks, null, 2));
 
     // Then create the canvas with the interpreted blocks
     const createDto: CreateCanvasDto = {

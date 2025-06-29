@@ -21,6 +21,14 @@ import {
 } from './dto/knowledge.dto';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
+import { WeaviateService } from '../vector/weaviate.service';
+import { OpenaiService } from '../openai/openai.service';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import * as fs from 'fs';
+const pdfParse = require('pdf-parse');
+import * as mammoth from 'mammoth';
+import * as XLSX from 'xlsx';
+import { FileExtractionService } from '../utils/file-extraction.service';
 
 @Injectable()
 export class KnowledgeService {
@@ -28,6 +36,8 @@ export class KnowledgeService {
     private prisma: PrismaService,
     private activityService: ActivityService,
     @InjectQueue('agent-training') private agentTrainingQueue: Queue,
+    public weaviateService: WeaviateService,
+    private openaiService: OpenaiService,
   ) {}
 
   async createEntry(
@@ -42,7 +52,7 @@ export class KnowledgeService {
       data: {
         workspaceId,
         createdBy: userId,
-        type: createDto.type,
+        type: createDto.type || KnowledgeEntryType.DOCUMENT,
         title: createDto.title,
         description: createDto.description,
         content: createDto.content,
@@ -321,8 +331,14 @@ export class KnowledgeService {
     userId: string,
     startTrainingDto: StartTrainingDto,
   ): Promise<void> {
+    if (!userId) {
+      throw new Error('userId is required to start training');
+    }
+
     const entry = await this.getEntryById(entryId);
     await this.verifyWorkspaceAccess(entry.workspaceId, userId);
+
+    console.log(`[Train] Starting training for entryId=${entryId}, title="${entry.title}", fileUrl=${entry.fileUrl}, contentLength=${entry.content?.length || 0}`);
 
     // Update entry training status
     await this.prisma.knowledgeEntry.update({
@@ -351,8 +367,68 @@ export class KnowledgeService {
       status: 'success',
     });
 
-    // TODO: Implement actual training logic here
-    // This would typically involve sending the content to a training service
+    try {
+      await this.weaviateService.initWorkspaceMemory(entry.workspaceId);
+      let text = '';
+      if (entry.fileUrl) {
+        const fileType = this.getFileTypeForExtraction(entry.mimeType, entry.fileName);
+        console.log(`[Train] Extracting text from file: fileUrl=${entry.fileUrl}, fileType=${fileType}`);
+        if (!fileType) throw new Error('Unsupported file type for extraction');
+        text = await FileExtractionService.extractTextFromFile(entry.fileUrl, fileType);
+        console.log(`[Train] Extracted text length: ${text.length}`);
+      } else {
+        text = entry.content || '';
+        console.log(`[Train] Using entry content, length: ${text.length}`);
+      }
+      if (!text || text.trim().length === 0) throw new Error('No text content found for training');
+      const chunks = this.chunkText(text, 1000); // 1000 chars per chunk
+      console.log(`[Train] File chunked into ${chunks.length} chunks.`);
+      let chunkCount = 0;
+      for (const [i, chunk] of chunks.entries()) {
+        const embedding = await this.openaiService.generateEmbedding(chunk);
+        console.log(`[Embed] Chunk ${i + 1}/${chunks.length} (length: ${chunk.length}) embedding length: ${embedding.length}`);
+        // Log chunk info
+        console.log(`[KnowledgeService][Training] Chunk ${i + 1}/${chunks.length} (length: ${chunk.length}):`, chunk.slice(0, 200).replace(/\n/g, ' ') + (chunk.length > 200 ? '...' : ''));
+        await this.weaviateService.storeWorkspaceMemory(
+          entry.workspaceId,
+          chunk,
+          '[KNOWLEDGE BASE]',
+          embedding,
+          new Date().toISOString(),
+          { entryId: entry.id, title: entry.title }
+        );
+        chunkCount++;
+      }
+      console.log(`[Train] Finished training entryId=${entryId}, totalChunks=${chunkCount}`);
+      await this.prisma.knowledgeEntry.update({
+        where: { id: entryId },
+        data: { trainingStatus: TrainingStatus.TRAINED, lastTrainedAt: new Date(), trainingMetrics: { chunkCount } },
+      });
+    } catch (err) {
+      console.error(`[Train][Error] Training failed for entryId=${entryId}:`, err);
+      await this.prisma.knowledgeEntry.update({
+        where: { id: entryId },
+        data: { trainingStatus: TrainingStatus.FAILED, trainingMetrics: { error: err.message } },
+      });
+      throw err;
+    }
+  }
+
+  private chunkText(text: string, maxLen: number): string[] {
+    // Simple chunking by paragraphs, fallback to maxLen
+    const paras = text.split(/\n\n+/).filter(Boolean);
+    const chunks: string[] = [];
+    let current = '';
+    for (const para of paras) {
+      if ((current + para).length > maxLen) {
+        if (current) chunks.push(current);
+        current = para;
+      } else {
+        current += (current ? '\n\n' : '') + para;
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
   }
 
   async getTrainingHistory(entryId: string, userId: string): Promise<TrainingHistoryDto[]> {
@@ -439,79 +515,14 @@ export class KnowledgeService {
     return result;
   }
 
-  // Private helper methods
+  // Add missing private helper methods
   private async verifyWorkspaceAccess(workspaceId: string, userId: string): Promise<void> {
     const member = await this.prisma.workspaceMember.findFirst({
       where: { workspaceId, userId },
     });
-
     if (!member) {
       throw new ForbiddenException('Access denied to workspace');
     }
-  }
-
-  private async updateEntryTags(entryId: string, workspaceId: string, tagNames: string[]): Promise<void> {
-    // Remove existing tags
-    await this.prisma.knowledgeEntry.update({
-      where: { id: entryId },
-      data: { tags: { set: [] } },
-    });
-
-    if (tagNames.length === 0) return;
-
-    // Create tags if they don't exist
-    for (const tagName of tagNames) {
-      await this.prisma.knowledgeTag.upsert({
-        where: { name_workspaceId: { name: tagName, workspaceId } },
-        create: { name: tagName, workspaceId },
-        update: {},
-      });
-    }
-
-    // Connect tags to entry
-    const tags = await this.prisma.knowledgeTag.findMany({
-      where: { name: { in: tagNames }, workspaceId },
-    });
-
-    await this.prisma.knowledgeEntry.update({
-      where: { id: entryId },
-      data: {
-        tags: {
-          connect: tags.map(tag => ({ id: tag.id })),
-        },
-      },
-    });
-  }
-
-  public async updateAgentAccess(
-    entryId: string,
-    workspaceId: string,
-    updateDto: UpdateAgentAccessDto,
-  ): Promise<void> {
-    // Remove existing access
-    await this.prisma.knowledgeAgentAccess.deleteMany({
-      where: { knowledgeEntryId: entryId },
-    });
-
-    if (updateDto.agentIds.length === 0) return;
-
-    // Verify agents belong to workspace
-    const agents = await this.prisma.agent.findMany({
-      where: { id: { in: updateDto.agentIds }, workspaceId },
-    });
-
-    if (agents.length !== updateDto.agentIds.length) {
-      throw new BadRequestException('Some agents do not belong to this workspace');
-    }
-
-    // Create new access records
-    await this.prisma.knowledgeAgentAccess.createMany({
-      data: updateDto.agentIds.map(agentId => ({
-        knowledgeEntryId: entryId,
-        agentId,
-        accessLevel: updateDto.accessLevel || AccessLevel.READ,
-      })),
-    });
   }
 
   private getIncludeOptions() {
@@ -525,6 +536,58 @@ export class KnowledgeService {
         },
       },
     };
+  }
+
+  private async updateEntryTags(entryId: string, workspaceId: string, tagNames: string[]): Promise<void> {
+    // Remove existing tags
+    await this.prisma.knowledgeEntry.update({
+      where: { id: entryId },
+      data: { tags: { set: [] } },
+    });
+    if (tagNames.length === 0) return;
+    // Create tags if they don't exist
+    for (const tagName of tagNames) {
+      await this.prisma.knowledgeTag.upsert({
+        where: { name_workspaceId: { name: tagName, workspaceId } },
+        create: { name: tagName, workspaceId },
+        update: {},
+      });
+    }
+    // Connect tags to entry
+    const tags = await this.prisma.knowledgeTag.findMany({
+      where: { name: { in: tagNames }, workspaceId },
+    });
+    await this.prisma.knowledgeEntry.update({
+      where: { id: entryId },
+      data: {
+        tags: {
+          connect: tags.map(tag => ({ id: tag.id })),
+        },
+      },
+    });
+  }
+
+  public async updateAgentAccess(entryId: string, workspaceId: string, updateDto: UpdateAgentAccessDto): Promise<void> {
+    // Remove existing access
+    await this.prisma.knowledgeAgentAccess.deleteMany({
+      where: { knowledgeEntryId: entryId },
+    });
+    if (updateDto.agentIds.length === 0) return;
+    // Verify agents belong to workspace
+    const agents = await this.prisma.agent.findMany({
+      where: { id: { in: updateDto.agentIds }, workspaceId },
+    });
+    if (agents.length !== updateDto.agentIds.length) {
+      throw new BadRequestException('Some agents do not belong to this workspace');
+    }
+    // Create new access records
+    await this.prisma.knowledgeAgentAccess.createMany({
+      data: updateDto.agentIds.map(agentId => ({
+        knowledgeEntryId: entryId,
+        agentId,
+        accessLevel: updateDto.accessLevel || AccessLevel.READ,
+      })),
+    });
   }
 
   public transformToResponseDto(entry: any): KnowledgeEntryResponseDto {
@@ -567,10 +630,24 @@ export class KnowledgeService {
       where: { workspaceId },
       _count: true,
     });
-
     return results.reduce((acc, result) => {
       acc[result[field]] = result._count;
       return acc;
     }, {});
   }
-} 
+
+  private getFileTypeForExtraction(mimeType: string | undefined, fileName: string | undefined): string {
+    if (mimeType === 'application/pdf' || (fileName && fileName.toLowerCase().endsWith('.pdf'))) return 'pdf';
+    if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || (fileName && fileName.toLowerCase().endsWith('.docx'))) return 'docx';
+    if (mimeType === 'application/msword' || (fileName && fileName.toLowerCase().endsWith('.doc'))) return 'doc';
+    if (mimeType === 'text/markdown' || (fileName && fileName.toLowerCase().endsWith('.md'))) return 'md';
+    if (mimeType === 'text/plain' || (fileName && fileName.toLowerCase().endsWith('.txt'))) return 'txt';
+    if (mimeType === 'text/csv' || (fileName && fileName.toLowerCase().endsWith('.csv'))) return 'csv';
+    if (mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || (fileName && fileName.toLowerCase().endsWith('.xlsx'))) return 'xlsx';
+    if (mimeType === 'application/vnd.ms-excel' || (fileName && fileName.toLowerCase().endsWith('.xls'))) return 'xls';
+    if (mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || (fileName && fileName.toLowerCase().endsWith('.pptx'))) return 'pptx';
+    if (mimeType === 'application/vnd.ms-powerpoint' || (fileName && fileName.toLowerCase().endsWith('.ppt'))) return 'ppt';
+    // Add more as needed
+    return '';
+  }
+}

@@ -40,6 +40,8 @@ model User {
     assistantMessages        AssistantMessage[]
     preferences              Json?
     usage                    Usage?
+    customActions            CustomAction[]
+    workflows                Workflow[]
     // Profile fields
     username                 String?           @unique
     bio                      String?
@@ -70,6 +72,7 @@ model Workspace {
     notificationDigests NotificationDigest[]
     projects        Project[]
     assistantMessages AssistantMessage[]
+    workflows       Workflow[]
 }
 
 model WorkspaceMember {
@@ -667,13 +670,74 @@ model AssistantMessage {
 }
 
 model Usage {
-  id           String   @id @default(uuid())
-  userId       String   @unique
-  promptsUsed  Int      @default(0)
-  promptsLimit Int      @default(100)
-  resetDate    DateTime
-  tier         String   @default("free")
-  user         User     @relation(fields: [userId], references: [id])
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+    id        String   @id @default(uuid())
+    userId    String   @unique
+    user      User     @relation(fields: [userId], references: [id])
+    requests  Int      @default(0)
+    tokens    Int      @default(0)
+    lastReset DateTime @default(now())
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+}
+
+model CustomAction {
+    id          String   @id @default(uuid())
+    name        String
+    description String
+    category    String   // 'api', 'file', 'web', 'system', 'data', 'communication'
+    parameters  Json     // Array of parameter definitions
+    code        String   // Custom action code
+    isPublic    Boolean  @default(false)
+    createdBy   String
+    usageCount  Int      @default(0)
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+    
+    // Relations
+    user        User     @relation(fields: [createdBy], references: [id])
+    
+    @@index([createdBy])
+    @@index([category])
+    @@index([isPublic])
+}
+
+model Workflow {
+    id             String         @id @default(uuid())
+    name           String
+    description    String?
+    triggers       String[]       // ['manual', 'file_upload', 'schedule', 'webhook']
+    isActive       Boolean        @default(true)
+    workspaceId    String?
+    createdBy      String
+    executionCount Int            @default(0)
+    lastExecuted   DateTime?
+    createdAt      DateTime       @default(now())
+    updatedAt      DateTime       @updatedAt
+    
+    // Relations
+    user           User           @relation(fields: [createdBy], references: [id])
+    workspace      Workspace?     @relation(fields: [workspaceId], references: [id])
+    steps          WorkflowStep[]
+    
+    @@index([createdBy])
+    @@index([workspaceId])
+    @@index([isActive])
+}
+
+model WorkflowStep {
+    id          String   @id @default(uuid())
+    workflowId  String
+    actionName  String
+    parameters  Json     // Action parameters
+    condition   String?  // Conditional logic for step execution
+    dependsOn   String[] // IDs of steps this step depends on
+    position    Int      // Order of execution
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+    
+    // Relations
+    workflow    Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+    
+    @@index([workflowId])
+    @@index([position])
 }

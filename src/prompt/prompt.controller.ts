@@ -21,16 +21,22 @@ export class PromptController {
     @Body() dto: InterpretPromptDto,
     @Request() req: any,
   ): Promise<InterpretPromptResponse> {
-    const userId = req.user?.id;
-    // Check usage before allowing prompt
-    const usage = await this.usageService.getUsageForUser(userId);
-    if (usage.promptsUsed >= usage.promptsLimit) {
-      throw new ForbiddenException('Prompt usage limit reached. Please upgrade your plan.');
-    }
+    const userId = req.user.userId;
+    
+    // Check usage limits before processing
+    await this.usageService.checkUsageLimit(userId, 0); // We'll update tokens after processing
+    
     // Interpret prompt
-    const result = await this.promptService.interpretPrompt(dto.prompt, dto.workspaceId);
+    const result = await this.promptService.interpretPrompt(dto.prompt, dto.workspaceId, userId);
+    
     // Increment usage after successful call
-    await this.usageService.incrementUsage(userId);
+    // Estimate tokens used based on prompt length and result content
+    const promptTokens = Math.ceil(dto.prompt.length / 4);
+    const resultTokens = Math.ceil(JSON.stringify(result).length / 4);
+    const estimatedTokens = promptTokens + resultTokens;
+    
+    await this.usageService.incrementUsage(userId, estimatedTokens, 'prompt');
+    
     return result;
   }
 } 

@@ -18,6 +18,7 @@ import { AssistantModule } from './assistant/assistant.module';
 import { FilesModule } from './files/files.module';
 import { BillingModule } from './billing/billing.module';
 import { UsageModule } from './usage/usage.module';
+import { ActionsModule } from './actions/actions.module';
 import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
@@ -39,7 +40,8 @@ import { ScheduleModule } from '@nestjs/schedule';
     AssistantModule,
     FilesModule,
     BillingModule,
-    UsageModule
+    UsageModule,
+    ActionsModule
   ],
   controllers: [AppController],
   providers: [AppService],

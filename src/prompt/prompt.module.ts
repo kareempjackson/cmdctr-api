@@ -7,17 +7,22 @@ import { UsageModule } from '../usage/usage.module';
 import { KnowledgeModule } from '../knowledge/knowledge.module';
 import { SmartDetectionService } from './smart-detection.service';
 import { EnhancedPromptService } from './enhanced-prompt.service';
+import { ActivityService } from '../activity/activity.service';
+import { PatternInferenceService } from '../knowledge/pattern-inference.service';
+import { AnalyticsModule } from '../analytics/analytics.module';
 
 @Module({
-  imports: [UsageModule, KnowledgeModule],
+  imports: [UsageModule, KnowledgeModule, AnalyticsModule],
   controllers: [PromptController],
   providers: [
     PromptService, 
     SmartDetectionService, 
     EnhancedPromptService,
     OpenaiService, 
-    ConfigService
+    ConfigService,
+    ActivityService,
+    PatternInferenceService
   ],
-  exports: [PromptService, SmartDetectionService, EnhancedPromptService],
+  exports: [PromptService, SmartDetectionService, EnhancedPromptService, PatternInferenceService],
 })
 export class PromptModule {} 

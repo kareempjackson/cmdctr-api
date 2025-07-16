@@ -7,6 +7,8 @@ services:
     # Use .env.docker for Docker, .env for local dev
     env_file:
       - .env.docker
+    environment:
+      - REDIS_URL=redis://redis:6379
     ports:
       - '3009:3009'
     depends_on:

@@ -42,6 +42,7 @@ model User {
     usage                    Usage?
     customActions            CustomAction[]
     workflows                Workflow[]
+    createdAgentTasks        AgentTask[]      @relation("AgentTaskCreator")
     // Profile fields
     username                 String?           @unique
     bio                      String?
@@ -50,6 +51,10 @@ model User {
     avatar                   String?
     twoFASecret              String?
     twoFAEnabled             Boolean           @default(false)
+    chatChannels             ChatChannel[]     @relation("UserChatChannels")
+    chatChannelMembers       ChatChannelMember[] @relation("UserChatChannelMembers")
+    chatMessages             ChatMessage[]     @relation("UserChatMessages")
+    feedbacks                Feedback[]        @relation("UserFeedbacks")
 }
 
 model Workspace {
@@ -73,6 +78,7 @@ model Workspace {
     projects        Project[]
     assistantMessages AssistantMessage[]
     workflows       Workflow[]
+    chatChannels    ChatChannel[]     @relation("WorkspaceChatChannels")
 }
 
 model WorkspaceMember {
@@ -89,11 +95,17 @@ model Agent {
     name              String
     purpose           String
     config            Json
+    memoryScope       String              @default("workspace") // workspace, project, personal
+    permissions       Json                @default("{\"canAccessFiles\": true, \"canReadJots\": true, \"canTakeActions\": true}")
+    icon              String              @default("🤖")
+    role              String              @default("Assistant")
+    model             String              @default("GPT-4")
     workspaceId       String
     createdAt         DateTime            @default(now())
     workspace         Workspace           @relation(fields: [workspaceId], references: [id])
     AgentMemory       AgentMemory[]
     AgentTrainingFile AgentTrainingFile[]
+    agentTasks        AgentTask[]
     activityLogs      ActivityLog[]
     knowledgeAccess   KnowledgeAgentAccess[]
     projectAgents     ProjectAgent[]
@@ -322,6 +334,7 @@ model Canvas {
     // Canvas configuration
     config      Json          @default("{}")  // Canvas-specific settings
     aiContext   String?       // AI context for this canvas
+    initialPrompt String?     // The AI prompt that created this canvas
     layout      String        @default("freeform") // 'freeform', 'grid', 'linear'
     
     // Status and permissions
@@ -404,6 +417,7 @@ model CanvasLayout {
     name        String        @default("Untitled Canvas")
     description String?
     createdBy   String
+    initialPrompt String?     // The AI prompt that created this canvas
     createdAt   DateTime      @default(now())
     updatedAt   DateTime      @updatedAt
     
@@ -711,6 +725,9 @@ model Workflow {
     createdBy      String
     executionCount Int            @default(0)
     lastExecuted   DateTime?
+    // Visual workflow data (React Flow format)
+    visualData     Json?          // Stores { nodes: Node[], edges: Edge[] } for visual workflows
+    workflowType   String         @default("sequential") // 'sequential' or 'visual'
     createdAt      DateTime       @default(now())
     updatedAt      DateTime       @updatedAt
     
@@ -740,4 +757,105 @@ model WorkflowStep {
     
     @@index([workflowId])
     @@index([position])
+}
+
+model AgentTask {
+    id            String    @id @default(uuid())
+    agentId       String
+    type          String    // 'reminder', 'document', 'notification', 'meeting', 'knowledge', 'custom'
+    parameters    Json      // Task-specific parameters
+    status        String    @default("pending") // 'pending', 'in_progress', 'completed', 'failed', 'cancelled'
+    result        Json?     // Task execution result
+    createdBy     String
+    scheduledFor  DateTime? // When the task should be executed
+    completedAt   DateTime? // When the task was completed
+    logs          Json?     // Execution logs and metadata
+    retryCount    Int       @default(0)
+    maxRetries    Int       @default(3)
+    priority      String    @default("medium") // 'low', 'medium', 'high', 'urgent'
+    tags          String[]  // For categorization and filtering
+    createdAt     DateTime  @default(now())
+    updatedAt     DateTime  @updatedAt
+    
+    // Relations
+    agent         Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+    creator       User      @relation("AgentTaskCreator", fields: [createdBy], references: [id])
+    
+    @@index([agentId])
+    @@index([status])
+    @@index([type])
+    @@index([priority])
+    @@index([scheduledFor])
+    @@index([createdAt])
+    @@index([createdBy])
+}
+
+model ChatChannel {
+    id          String   @id @default(uuid())
+    workspaceId String
+    name        String
+    isPrivate   Boolean  @default(false)
+    createdBy   String
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @default(now())
+
+    workspace   Workspace @relation("WorkspaceChatChannels", fields: [workspaceId], references: [id])
+    creator     User      @relation("UserChatChannels", fields: [createdBy], references: [id])
+    messages    ChatMessage[]
+    members     ChatChannelMember[]
+
+    @@unique([workspaceId, name])
+    @@index([workspaceId])
+}
+
+model ChatChannelMember {
+    id          String   @id @default(uuid())
+    channelId   String
+    userId      String
+    joinedAt    DateTime @default(now())
+
+    channel     ChatChannel @relation(fields: [channelId], references: [id])
+    user        User        @relation("UserChatChannelMembers", fields: [userId], references: [id])
+
+    @@unique([channelId, userId])
+    @@index([userId])
+}
+
+model ChatMessage {
+    id            String   @id @default(uuid())
+    channelId     String
+    userId        String
+    content       String
+    threadRootId  String?  // If this is a reply, points to the root message
+    blockId       String?  // If linked to a canvas block
+    createdAt     DateTime @default(now())
+    updatedAt     DateTime @default(now())
+
+    channel       ChatChannel @relation(fields: [channelId], references: [id])
+    user          User        @relation("UserChatMessages", fields: [userId], references: [id])
+    threadRoot    ChatMessage? @relation("ThreadRoot", fields: [threadRootId], references: [id])
+    threadReplies ChatMessage[] @relation("ThreadRoot")
+
+    feedback      Feedback[] @relation("MessageFeedback")
+
+    @@index([channelId])
+    @@index([threadRootId])
+    @@index([blockId])
+}
+
+model Feedback {
+    id          String   @id @default(uuid())
+    userId      String
+    targetType  String   // 'block', 'message', 'insight'
+    targetId    String
+    rating      Int      // e.g., 1-5 or -1/0/1
+    comment     String?
+    createdAt   DateTime @default(now())
+    messageId   String?  // For message feedback
+
+    user        User     @relation("UserFeedbacks", fields: [userId], references: [id])
+    message     ChatMessage? @relation("MessageFeedback", fields: [messageId], references: [id])
+
+    @@index([targetType, targetId])
+    @@index([userId])
 }

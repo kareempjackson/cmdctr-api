@@ -27,6 +27,7 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
 import * as PNG from 'pngjs';
 import { KnowledgeEntryStatus } from '../knowledge/dto/knowledge.dto';
 import { v4 as uuidv4 } from 'uuid';
+import { CreateAgentTaskDto, QueryAgentTasksDto, UpdateAgentTaskDto } from './dto';
 
 @Injectable()
 export class AgentsService {
@@ -1230,6 +1231,13 @@ export class AgentsService {
    * Update agent knowledge access
    */
   async updateAgentKnowledgeAccess(agentId: string, knowledgeEntryIds: string[], userId: string, accessLevel: 'read' | 'write' = 'read') {
+    // Validate input parameters
+    if (!knowledgeEntryIds || !Array.isArray(knowledgeEntryIds)) {
+      knowledgeEntryIds = [];
+    }
+
+    console.log(`[DEBUG] updateAgentKnowledgeAccess called with agentId=${agentId}, knowledgeEntryIds=${JSON.stringify(knowledgeEntryIds)}, userId=${userId}, accessLevel=${accessLevel}`);
+
     // Ensure user is a member of the agent's workspace
     const agent = await this.prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) throw new NotFoundException('Agent not found');
@@ -1238,47 +1246,83 @@ export class AgentsService {
     });
     if (!member) throw new ForbiddenException('Not a member of this workspace');
 
-    // Verify all knowledge entries belong to the same workspace
-    const knowledgeEntries = await this.prisma.knowledgeEntry.findMany({
-      where: { 
-        id: { in: knowledgeEntryIds },
-        workspaceId: agent.workspaceId 
-      }
-    });
-
-    if (knowledgeEntries.length !== knowledgeEntryIds.length) {
-      throw new BadRequestException('Some knowledge entries not found or not in the same workspace');
-    }
-
-    // Remove existing access
-    await this.prisma.knowledgeAgentAccess.deleteMany({
-      where: { agentId }
-    });
-
-    // Add new access
+    // Verify all knowledge entries belong to the same workspace (only if we have IDs to check)
     if (knowledgeEntryIds.length > 0) {
-      await this.prisma.knowledgeAgentAccess.createMany({
-        data: knowledgeEntryIds.map(entryId => ({
-          agentId,
-          knowledgeEntryId: entryId,
-          accessLevel
-        }))
+      const knowledgeEntries = await this.prisma.knowledgeEntry.findMany({
+        where: { 
+          id: { in: knowledgeEntryIds },
+          workspaceId: agent.workspaceId 
+        }
       });
+
+      if (knowledgeEntries.length !== knowledgeEntryIds.length) {
+        throw new BadRequestException('Some knowledge entries not found or not in the same workspace');
+      }
     }
 
-    // Log activity
-    await this.activityService.logAgentActivity(
-      agentId,
-      userId,
-      'knowledge-access-update',
-      {
-        knowledgeEntriesCount: knowledgeEntryIds.length,
-        accessLevel,
-        entryIds: knowledgeEntryIds,
-      },
-    );
+    // Use transaction to ensure atomic operation
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // Remove existing access
+        console.log(`[DEBUG] Deleting existing access for agent ${agentId}`);
+        const deleteResult = await tx.knowledgeAgentAccess.deleteMany({
+          where: { agentId }
+        });
+        console.log(`[DEBUG] Deleted ${deleteResult.count} existing access records`);
 
-    return { success: true, message: 'Agent knowledge access updated successfully' };
+        // Add new access
+        if (knowledgeEntryIds.length > 0) {
+          console.log(`[DEBUG] Creating ${knowledgeEntryIds.length} new access records`);
+          const createResult = await tx.knowledgeAgentAccess.createMany({
+            data: knowledgeEntryIds.map(entryId => ({
+              agentId,
+              knowledgeEntryId: entryId,
+              accessLevel
+            }))
+          });
+          console.log(`[DEBUG] Created ${createResult.count} new access records`);
+        }
+      });
+
+      console.log(`[DEBUG] Transaction completed successfully`);
+
+      // Log activity (don't let this fail the whole operation)
+      try {
+        await this.activityService.logActivity({
+          category: 'agent',
+          action: 'knowledge-access-update',
+          description: `Updated knowledge access for agent ${agent.name}`,
+          userId,
+          workspaceId: agent.workspaceId,
+          agentId,
+          resource: agentId,
+          metadata: {
+            knowledgeEntriesCount: knowledgeEntryIds.length,
+            accessLevel,
+            entryIds: knowledgeEntryIds,
+          },
+          status: 'success',
+        });
+      } catch (loggingError) {
+        console.error(`[ERROR] Failed to log activity for agent knowledge access update:`, loggingError);
+        // Don't throw - logging failures shouldn't break the main operation
+      }
+
+      // Verify the changes were saved by checking the current state
+      const finalAccessCount = await this.prisma.knowledgeAgentAccess.count({
+        where: { agentId }
+      });
+      console.log(`[DEBUG] Final access count for agent ${agentId}: ${finalAccessCount}, expected: ${knowledgeEntryIds.length}`);
+
+      return { 
+        success: true, 
+        message: `Agent knowledge access updated successfully. ${finalAccessCount} entries now accessible.`,
+        accessCount: finalAccessCount 
+      };
+    } catch (error) {
+      console.error(`[ERROR] Failed to update agent knowledge access:`, error);
+      throw error;
+    }
   }
 
   async trainAgentOnKnowledge(agentId: string, knowledgeEntryId: string, workspaceId: string) {
@@ -1344,6 +1388,657 @@ export class AgentsService {
       console.error(`[Train][Error] Failed processing file for agent ${agentId}: fileId=${trainingFile.id}, error:`, err);
       throw err;
     }
+  }
+
+  // Agent Task Management Methods
+  async createAgentTask(createTaskDto: CreateAgentTaskDto, userId: string) {
+    const { agentId, type, parameters, scheduledFor, priority, tags, maxRetries } = createTaskDto;
+
+    // Verify agent exists and user has access
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+      include: { workspace: true }
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with ID ${agentId} not found`);
+    }
+
+    // TODO: Add workspace access validation
+    // const hasAccess = await this.validateWorkspaceAccess(userId, agent.workspaceId);
+
+    const task = await this.prisma.agentTask.create({
+      data: {
+        agentId,
+        type,
+        parameters,
+        scheduledFor: scheduledFor ? new Date(scheduledFor) : null,
+        priority: priority || 'medium',
+        tags: tags || [],
+        maxRetries: maxRetries || 3,
+        createdBy: userId,
+        status: 'pending'
+      },
+      include: {
+        agent: true,
+        creator: true
+      }
+    });
+
+    return task;
+  }
+
+  async analyzeTask(agentId: string, instruction: string, userId: string) {
+    // Verify agent exists and user has access
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+      include: { workspace: true }
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with ID ${agentId} not found`);
+    }
+
+    // For now, provide intelligent analysis based on instruction content
+    // TODO: Integrate with OpenAI for more sophisticated analysis
+    const analysisKeywords = instruction.toLowerCase();
+    let estimatedDuration = '5-10 minutes';
+    let approach = ['Analyze task requirements', 'Execute the task', 'Provide results'];
+    let requiredResources = ['Agent reasoning'];
+
+    if (analysisKeywords.includes('research') || analysisKeywords.includes('analyze')) {
+      estimatedDuration = '10-15 minutes';
+      approach = ['Research topic thoroughly', 'Analyze findings', 'Compile comprehensive summary'];
+      requiredResources = ['Knowledge base access', 'Research capabilities', 'Analysis tools'];
+    } else if (analysisKeywords.includes('email') || analysisKeywords.includes('message')) {
+      estimatedDuration = '2-5 minutes';
+      approach = ['Review context and recipients', 'Draft message content', 'Send communication'];
+      requiredResources = ['Communication access', 'Context awareness'];
+    } else if (analysisKeywords.includes('schedule') || analysisKeywords.includes('meeting')) {
+      estimatedDuration = '3-7 minutes';
+      approach = ['Check availability', 'Coordinate with participants', 'Create calendar entry'];
+      requiredResources = ['Calendar access', 'Scheduling tools'];
+    }
+
+    return {
+      understanding: `I understand you want me to ${instruction}. I'll handle this intelligently by breaking it down into manageable steps and leveraging the appropriate resources.`,
+      approach,
+      estimatedDuration,
+      requiredResources
+    };
+  }
+
+  async getAgentTasks(query: QueryAgentTasksDto, userId: string) {
+    const {
+      agentId,
+      type,
+      status,
+      priority,
+      tags,
+      scheduledForAfter,
+      scheduledForBefore,
+      createdAtAfter,
+      createdAtBefore,
+      page = 1,
+      limit = 20,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = query;
+
+    const skip = (page - 1) * limit;
+
+    // Build where clause
+    const where: any = {};
+
+    if (agentId) where.agentId = agentId;
+    if (type) where.type = type;
+    if (status) where.status = status;
+    if (priority) where.priority = priority;
+    if (tags && tags.length > 0) {
+      where.tags = {
+        hasSome: tags
+      };
+    }
+    if (scheduledForAfter || scheduledForBefore) {
+      where.scheduledFor = {};
+      if (scheduledForAfter) where.scheduledFor.gte = new Date(scheduledForAfter);
+      if (scheduledForBefore) where.scheduledFor.lte = new Date(scheduledForBefore);
+    }
+    if (createdAtAfter || createdAtBefore) {
+      where.createdAt = {};
+      if (createdAtAfter) where.createdAt.gte = new Date(createdAtAfter);
+      if (createdAtBefore) where.createdAt.lte = new Date(createdAtBefore);
+    }
+
+    // TODO: Add workspace access filtering
+    // where.agent = { workspaceId: { in: userWorkspaceIds } };
+
+    const [tasks, total] = await Promise.all([
+      this.prisma.agentTask.findMany({
+        where,
+        include: {
+          agent: true,
+          creator: true
+        },
+        orderBy: {
+          [sortBy]: sortOrder
+        },
+        skip,
+        take: limit
+      }),
+      this.prisma.agentTask.count({ where })
+    ]);
+
+    return {
+      tasks,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    };
+  }
+
+  async getAgentTask(taskId: string, userId: string) {
+    const task = await this.prisma.agentTask.findUnique({
+      where: { id: taskId },
+      include: {
+        agent: {
+          include: {
+            workspace: true
+          }
+        },
+        creator: true
+      }
+    });
+
+    if (!task) {
+      throw new NotFoundException(`Task with ID ${taskId} not found`);
+    }
+
+    // TODO: Add workspace access validation
+    // const hasAccess = await this.validateWorkspaceAccess(userId, task.agent.workspaceId);
+
+    return task;
+  }
+
+  async updateAgentTask(taskId: string, updateTaskDto: UpdateAgentTaskDto, userId: string) {
+    const task = await this.getAgentTask(taskId, userId);
+
+    // Only allow updates if task is not completed or cancelled
+    if (task.status === 'completed' || task.status === 'cancelled') {
+      throw new BadRequestException(`Cannot update task in status: ${task.status}`);
+    }
+
+    const updatedTask = await this.prisma.agentTask.update({
+      where: { id: taskId },
+      data: {
+        ...updateTaskDto,
+        scheduledFor: updateTaskDto.scheduledFor ? new Date(updateTaskDto.scheduledFor) : undefined,
+        completedAt: updateTaskDto.completedAt ? new Date(updateTaskDto.completedAt) : undefined
+      },
+      include: {
+        agent: true,
+        creator: true
+      }
+    });
+
+    return updatedTask;
+  }
+
+  async deleteAgentTask(taskId: string, userId: string) {
+    const task = await this.getAgentTask(taskId, userId);
+
+    // Only allow deletion if task is not in progress
+    if (task.status === 'in_progress') {
+      throw new BadRequestException('Cannot delete task that is currently in progress');
+    }
+
+    await this.prisma.agentTask.delete({
+      where: { id: taskId }
+    });
+
+    return { message: 'Task deleted successfully' };
+  }
+
+  async getAgentTaskStats(agentId?: string, userId?: string) {
+    const where: any = {};
+    
+    if (agentId) where.agentId = agentId;
+    // TODO: Add workspace access filtering
+
+    const stats = await this.prisma.agentTask.groupBy({
+      by: ['status'],
+      where,
+      _count: {
+        status: true
+      }
+    });
+
+    const totalTasks = await this.prisma.agentTask.count({ where });
+    const pendingTasks = await this.prisma.agentTask.count({
+      where: {
+        ...where,
+        status: 'pending',
+        scheduledFor: null
+      }
+    });
+
+    const scheduledTasks = await this.prisma.agentTask.count({
+      where: {
+        ...where,
+        status: 'pending',
+        scheduledFor: {
+          not: null
+        }
+      }
+    });
+
+    return {
+      total: totalTasks,
+      pending: pendingTasks,
+      scheduled: scheduledTasks,
+      byStatus: stats.reduce((acc, stat) => {
+        acc[stat.status] = stat._count.status;
+        return acc;
+      }, {} as Record<string, number>)
+    };
+  }
+
+  async retryAgentTask(taskId: string, userId: string) {
+    const task = await this.getAgentTask(taskId, userId);
+
+    if (task.status === 'in_progress') {
+      throw new BadRequestException('Cannot retry task that is currently in progress');
+    }
+
+    if (task.status === 'completed') {
+      throw new BadRequestException('Cannot retry completed task');
+    }
+
+    // Reset task for retry
+    const currentLogs = (task.logs as Record<string, any>) || {};
+    
+    await this.prisma.agentTask.update({
+      where: { id: taskId },
+      data: {
+        status: 'pending',
+        retryCount: 0,
+        logs: {
+          ...currentLogs,
+          [`${new Date().toISOString()}`]: {
+            action: 'manual_retry',
+            message: 'Task manually retried by user'
+          }
+        }
+      }
+    });
+
+    return { message: 'Task queued for retry' };
+  }
+
+  async cancelAgentTask(taskId: string, userId: string) {
+    const task = await this.getAgentTask(taskId, userId);
+
+    if (task.status === 'completed' || task.status === 'cancelled') {
+      throw new BadRequestException(`Cannot cancel task in status: ${task.status}`);
+    }
+
+    const currentLogs = (task.logs as Record<string, any>) || {};
+
+    await this.prisma.agentTask.update({
+      where: { id: taskId },
+      data: {
+        status: 'cancelled',
+        logs: {
+          ...currentLogs,
+          [`${new Date().toISOString()}`]: {
+            action: 'cancelled',
+            message: 'Task cancelled by user'
+          }
+        }
+      }
+    });
+
+    return { message: 'Task cancelled successfully' };
+  }
+
+  // Agent Workflow Methods
+  async getAgentWorkflows(agentId: string, userId: string) {
+    // Verify agent access
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+      include: { workspace: true }
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with ID ${agentId} not found`);
+    }
+
+    // For now, return workflows created by user in the same workspace
+    // This could be enhanced to have explicit agent-workflow relationships
+    const workflows = await this.prisma.workflow.findMany({
+      where: {
+        createdBy: userId,
+        workspaceId: agent.workspaceId,
+      },
+      include: {
+        steps: {
+          orderBy: { position: 'asc' },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return workflows;
+  }
+
+  async createAgentWorkflow(agentId: string, workflowData: any, userId: string) {
+    // Verify agent access
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with ID ${agentId} not found`);
+    }
+
+    // Create workflow with agent's workspace
+    const { name, description, steps, triggers, isActive, nodes, edges } = workflowData;
+    
+    const isVisualWorkflow = nodes && edges;
+    const workflowType = isVisualWorkflow ? 'visual' : 'sequential';
+    
+    let workflowSteps = steps || [];
+    let visualData: any = null;
+    
+    if (isVisualWorkflow) {
+      visualData = { nodes, edges };
+      // Convert visual workflow to sequential steps for execution
+      workflowSteps = this.convertVisualToSteps(nodes, edges);
+    }
+
+    const workflow = await this.prisma.workflow.create({
+      data: {
+        name,
+        description,
+        triggers: triggers || ['manual'],
+        isActive: isActive !== undefined ? isActive : true,
+        workflowType,
+        visualData: visualData || undefined,
+        createdBy: userId,
+        workspaceId: agent.workspaceId,
+        executionCount: 0,
+        steps: {
+          create: workflowSteps.map((step: any, index: number) => ({
+            actionName: step.actionName,
+            parameters: step.parameters || {},
+            condition: step.condition,
+            dependsOn: step.dependsOn || [],
+            position: index,
+          })),
+        },
+      },
+      include: {
+        steps: {
+          orderBy: { position: 'asc' },
+        },
+      },
+    });
+
+    return workflow;
+  }
+
+  async analyzeWorkflow(agentId: string, description: string, userId: string) {
+    // Verify agent access
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with ID ${agentId} not found`);
+    }
+
+    try {
+      // Use OpenAI to analyze the workflow description
+      const prompt = `Analyze the following workflow description and provide structured output:
+
+Description: "${description}"
+
+Please respond with a JSON object containing:
+{
+  "understanding": "Brief summary of what this workflow accomplishes",
+  "suggestedName": "A concise name for this workflow",
+  "trigger": {
+    "type": "string (e.g., 'form_submission', 'schedule', 'webhook', 'manual')",
+    "description": "Description of when this workflow should trigger"
+  },
+  "steps": [
+    {
+      "action": "Action name (e.g., 'Send Email', 'Create Lead', 'Notify Team')",
+      "description": "Description of what this step does"
+    }
+  ],
+  "complexity": "Simple | Moderate | Complex",
+  "estimatedTime": "Estimated setup time (e.g., '5-10 minutes')"
+}
+
+Focus on identifying:
+- Trigger events (when something happens)
+- Actions to take (send, create, notify, update)
+- Integration points (email, CRM, Slack, etc.)`;
+
+      const response = await this.openai.chatCompletion({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a workflow analysis expert. Analyze workflow descriptions and return structured JSON responses.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 1000,
+      });
+
+      let analysisResult;
+      try {
+        // Try to parse the JSON response
+        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          analysisResult = JSON.parse(jsonMatch[0]);
+        } else {
+          throw new Error('No JSON found in response');
+        }
+      } catch (parseError) {
+        // Fallback analysis if JSON parsing fails
+        analysisResult = this.generateFallbackAnalysis(description);
+      }
+
+      return analysisResult;
+    } catch (error) {
+      console.error('Workflow analysis error:', error);
+      // Return fallback analysis on any error
+      return this.generateFallbackAnalysis(description);
+    }
+  }
+
+  private generateFallbackAnalysis(description: string) {
+    const triggerKeywords = ['when', 'if', 'whenever', 'on'];
+    const actionKeywords = ['send', 'create', 'notify', 'update', 'schedule', 'generate'];
+    
+    const hasTrigger = triggerKeywords.some(keyword => 
+      description.toLowerCase().includes(keyword)
+    );
+
+    const detectedActions = actionKeywords
+      .filter(keyword => description.toLowerCase().includes(keyword))
+      .map(keyword => ({
+        action: keyword.charAt(0).toUpperCase() + keyword.slice(1),
+        description: `${keyword.charAt(0).toUpperCase() + keyword.slice(1)} action based on description`
+      }));
+
+    const trigger = hasTrigger ? {
+      type: 'manual',
+      description: 'Manual trigger based on description'
+    } : null;
+
+    return {
+      understanding: `This workflow ${hasTrigger ? 'triggers when specific conditions are met' : 'performs a series of actions'} and includes ${detectedActions.length} main steps.`,
+      suggestedName: 'Custom Workflow',
+      trigger,
+      steps: detectedActions.length > 0 ? detectedActions : [{
+        action: 'Custom Action',
+        description: 'Perform actions as described'
+      }],
+      complexity: detectedActions.length <= 2 ? 'Simple' : detectedActions.length <= 4 ? 'Moderate' : 'Complex',
+      estimatedTime: detectedActions.length <= 2 ? '2-5 minutes' : detectedActions.length <= 4 ? '5-10 minutes' : '10-15 minutes'
+    };
+  }
+
+  async updateAgentWorkflow(agentId: string, workflowId: string, workflowData: any, userId: string) {
+    // Verify agent access
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with ID ${agentId} not found`);
+    }
+
+    // Verify workflow ownership and update
+    const workflow = await this.prisma.workflow.findFirst({
+      where: { 
+        id: workflowId, 
+        createdBy: userId,
+        workspaceId: agent.workspaceId,
+      },
+    });
+
+    if (!workflow) {
+      throw new NotFoundException('Workflow not found or access denied');
+    }
+
+    const updatedWorkflow = await this.prisma.workflow.update({
+      where: { id: workflowId },
+      data: {
+        name: workflowData.name,
+        description: workflowData.description,
+        isActive: workflowData.isActive,
+        triggers: workflowData.triggers,
+      },
+      include: {
+        steps: {
+          orderBy: { position: 'asc' },
+        },
+      },
+    });
+
+    return updatedWorkflow;
+  }
+
+  async deleteAgentWorkflow(agentId: string, workflowId: string, userId: string) {
+    // Verify agent access
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with ID ${agentId} not found`);
+    }
+
+    // Verify workflow ownership and delete
+    const workflow = await this.prisma.workflow.findFirst({
+      where: { 
+        id: workflowId, 
+        createdBy: userId,
+        workspaceId: agent.workspaceId,
+      },
+    });
+
+    if (!workflow) {
+      throw new NotFoundException('Workflow not found or access denied');
+    }
+
+    await this.prisma.workflow.delete({
+      where: { id: workflowId },
+    });
+
+    return { message: 'Workflow deleted successfully' };
+  }
+
+  async executeAgentWorkflow(agentId: string, workflowId: string, userId: string) {
+    // Verify agent access
+    const agent = await this.prisma.agent.findUnique({
+      where: { id: agentId },
+    });
+
+    if (!agent) {
+      throw new NotFoundException(`Agent with ID ${agentId} not found`);
+    }
+
+    // Verify workflow access
+    const workflow = await this.prisma.workflow.findFirst({
+      where: { 
+        id: workflowId, 
+        createdBy: userId,
+        workspaceId: agent.workspaceId,
+      },
+      include: {
+        steps: {
+          orderBy: { position: 'asc' },
+        },
+      },
+    });
+
+    if (!workflow) {
+      throw new NotFoundException('Workflow not found or access denied');
+    }
+
+    if (!workflow.isActive) {
+      throw new BadRequestException('Workflow is not active');
+    }
+
+    // Use the ActionsService to execute the workflow
+    // For now, delegate to a placeholder implementation
+    // In a real implementation, you'd call the ActionsService.executeWorkflow method
+    
+    const startTime = Date.now();
+    const results: any[] = [];
+
+    // Update execution count
+    await this.prisma.workflow.update({
+      where: { id: workflowId },
+      data: { 
+        executionCount: { increment: 1 },
+        lastExecuted: new Date(),
+      },
+    });
+
+    return {
+      success: true,
+      workflowId,
+      agentId,
+      executionTime: Date.now() - startTime,
+      steps: workflow.steps.length,
+      message: `Workflow executed successfully for agent ${agent.name}`,
+    };
+  }
+
+  // Helper method for converting visual workflows to steps
+  private convertVisualToSteps(nodes: any[], edges: any[]): any[] {
+    // Simple implementation - in a real system, this would be more sophisticated
+    const actionNodes = nodes.filter(node => node.type === 'action');
+    return actionNodes.map((node, index) => ({
+      actionName: node.data.actionName,
+      parameters: node.data.parameters || {},
+      condition: node.data.condition,
+      dependsOn: [],
+    }));
   }
 }
 

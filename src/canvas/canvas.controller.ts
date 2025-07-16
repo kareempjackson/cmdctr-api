@@ -21,6 +21,7 @@ import {
   UpdateCanvasDto,
 } from './canvas.service';
 import { BlockInstruction, PromptService } from '../prompt/prompt.service';
+import { ActivityService } from '../activity/activity.service';
 
 export class CreateCanvasFromPromptDto {
   @IsString()
@@ -39,6 +40,22 @@ export class CreateCanvasFromPromptDto {
 
   @IsOptional()
   deterministic?: boolean;
+}
+
+export class CreateCanvasFromTaskDto {
+  @IsString()
+  taskId: string;
+
+  @IsString()
+  workspaceId: string;
+
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
 }
 
 export class AddBlockDto {
@@ -71,6 +88,7 @@ export class CanvasController {
   constructor(
     private readonly canvasService: CanvasService,
     private readonly promptService: PromptService,
+    private readonly activityService: ActivityService,
   ) {}
 
   @Post('from-prompt')
@@ -99,20 +117,102 @@ export class CanvasController {
       { deterministic: dto.deterministic === true ? true : false }
     );
 
-    console.log('Prompt interpretation result:', interpretation);
-    console.log('Prompt interpretation blocks (stringified):', JSON.stringify(interpretation.blocks, null, 2));
+    // --- ENHANCEMENT: Inference-based dashboard and AI insights integration ---
+    let blocks = interpretation.blocks;
+    let insightsBlock: BlockInstruction | null = null;
+    let dataForInference: any = null;
+    let metadataForInference: any = null;
 
-    // Then create the canvas with the interpreted blocks
+    // Try to extract structured data from the interpretation or workspace
+    if (blocks && blocks.length > 0) {
+      // Look for a table or chart block with data
+      const tableBlock = blocks.find(b => b.type === 'table' && b.data && b.data.rows && b.data.columns);
+      const chartBlock = blocks.find(b => b.type === 'chart' && b.data && b.data.labels && b.data.data);
+      if (tableBlock) {
+        dataForInference = tableBlock.data.rows;
+        metadataForInference = { columns: tableBlock.data.columns };
+      } else if (chartBlock) {
+        // Try to reconstruct data from chart block
+        dataForInference = chartBlock.data.data.map((val: any, idx: number) => ({ label: chartBlock.data.labels[idx], value: val }));
+        metadataForInference = { columns: ['label', 'value'] };
+      }
+    }
+
+    // If we have data, run pattern inference and AI insights
+    if (dataForInference && metadataForInference) {
+      try {
+        // Pattern inference
+        const inferenceResult = await this.promptService['patternInferenceService'].inferDashboardFromData(
+          dataForInference,
+          metadataForInference,
+          dto.prompt
+        );
+        // AI insights
+        const aiInsights = await this.promptService['aiInsightsService'].generateInsights({
+          data: dataForInference,
+          metadata: metadataForInference,
+          context: dto.prompt
+        });
+        // Add an insights block
+        if (aiInsights && aiInsights.length > 0) {
+          insightsBlock = {
+            type: 'note',
+            title: 'AI Insights',
+            config: { markdown: true, collapsible: true, theme: 'insights' },
+            data: { content: this.promptService['formatInsightsForDisplay'](aiInsights) },
+            position: blocks.length
+          };
+        }
+        if (insightsBlock) {
+          blocks.push(insightsBlock);
+        }
+        // Optionally, add more blocks from inferenceResult.generatedDashboard.blocks
+        if (inferenceResult.generatedDashboard && inferenceResult.generatedDashboard.blocks) {
+          const extraBlocks = inferenceResult.generatedDashboard.blocks.map((block: any, idx: number) => ({
+            ...block,
+            position: blocks.length + idx + 1
+          }));
+          blocks = blocks.concat(extraBlocks);
+        }
+      } catch (err) {
+        console.error('Error running inference/insights for canvas:', err);
+      }
+    }
+    // --- END ENHANCEMENT ---
+
+    // Then create the canvas with the interpreted (and enhanced) blocks
     const createDto: CreateCanvasDto = {
       workspaceId: dto.workspaceId,
       name: dto.name || interpretation.intent,
       description: dto.description || interpretation.description,
-      blocks: interpretation.blocks,
+      blocks: blocks,
+      initialPrompt: dto.prompt,
     };
 
-    console.log('Creating canvas with DTO:', createDto);
+    const canvas = await this.canvasService.createCanvas(req.user.userId, createDto);
 
-    return this.canvasService.createCanvas(req.user.userId, createDto);
+    // Log AI canvas creation activity
+    await this.activityService.logActivity({
+      userId: req.user.userId,
+      workspaceId: dto.workspaceId,
+      category: 'canvas',
+      action: 'create-from-ai',
+      resource: canvas.id,
+      description: `AI-generated canvas created: "${canvas.name}" from prompt: "${dto.prompt.substring(0, 100)}${dto.prompt.length > 100 ? '...' : ''}"`,
+      metadata: {
+        canvasId: canvas.id,
+        canvasName: canvas.name,
+        prompt: dto.prompt,
+        intent: interpretation.intent,
+        blocksCreated: blocks.length,
+        blockTypes: blocks.map(block => block.type),
+        workspaceId: dto.workspaceId,
+        aiGenerated: true,
+      },
+      status: 'success',
+    });
+
+    return canvas;
   }
 
   @Post()
@@ -121,6 +221,14 @@ export class CanvasController {
     @Request() req: any,
   ): Promise<CanvasLayout> {
     return this.canvasService.createCanvas(req.user.userId, dto);
+  }
+
+  @Post('from-task')
+  async createCanvasFromTask(
+    @Body() dto: CreateCanvasFromTaskDto,
+    @Request() req: any,
+  ): Promise<CanvasLayout> {
+    return this.canvasService.createCanvasFromTask(req.user.userId, dto);
   }
 
   @Get(':id')

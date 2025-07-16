@@ -13,6 +13,7 @@ const execAsync = promisify(exec);
 
 export interface ActionDefinition {
   name: string;
+  displayName: string;
   description: string;
   parameters: {
     type: 'string' | 'number' | 'boolean' | 'object' | 'array';
@@ -56,16 +57,17 @@ export class ActionsService {
     // API Actions
     this.registerAction({
       name: 'http_request',
-      description: 'Make HTTP requests to external APIs or web services',
+      displayName: 'Call External API',
+      description: 'Connect to external websites, APIs, or web services to fetch or send data',
       parameters: [
-        { type: 'string', description: 'HTTP method (GET, POST, PUT, DELETE)', required: true },
-        { type: 'string', description: 'URL to make the request to', required: true },
-        { type: 'object', description: 'Request headers (optional)', required: false },
-        { type: 'object', description: 'Request body (optional)', required: false },
+        { type: 'string', description: 'Request type: GET (fetch data), POST (send data), PUT (update), or DELETE', required: true },
+        { type: 'string', description: 'Web address (URL) to connect to', required: true },
+        { type: 'object', description: 'Additional headers like authentication tokens', required: false },
+        { type: 'object', description: 'Data to send (for POST/PUT requests)', required: false },
       ],
       examples: [
-        'http_request("GET", "https://api.example.com/data")',
-        'http_request("POST", "https://api.example.com/users", {"Content-Type": "application/json"}, {"name": "John"})',
+        'Get weather data from weather API',
+        'Send user registration data to external service',
       ],
       category: 'api',
     });
@@ -73,43 +75,46 @@ export class ActionsService {
     // File Actions
     this.registerAction({
       name: 'read_file',
-      description: 'Read content from a file',
+      displayName: 'Read File Content',
+      description: 'Open and read the contents of a text file, document, or data file',
       parameters: [
-        { type: 'string', description: 'Path to the file to read', required: true },
-        { type: 'string', description: 'Encoding (default: utf8)', required: false },
+        { type: 'string', description: 'Full path to the file you want to read', required: true },
+        { type: 'string', description: 'File encoding (usually utf8 for text files)', required: false },
       ],
       examples: [
-        'read_file("/path/to/file.txt")',
-        'read_file("/path/to/file.json", "utf8")',
+        'Read a CSV file with customer data',
+        'Open a configuration file to check settings',
       ],
       category: 'file',
     });
 
     this.registerAction({
       name: 'write_file',
-      description: 'Write content to a file',
+      displayName: 'Save to File',
+      description: 'Create a new file or update an existing file with new content',
       parameters: [
-        { type: 'string', description: 'Path to the file to write', required: true },
-        { type: 'string', description: 'Content to write to the file', required: true },
-        { type: 'string', description: 'Encoding (default: utf8)', required: false },
+        { type: 'string', description: 'Where to save the file (full path and filename)', required: true },
+        { type: 'string', description: 'The content you want to save in the file', required: true },
+        { type: 'string', description: 'File encoding (usually utf8 for text files)', required: false },
       ],
       examples: [
-        'write_file("/path/to/file.txt", "Hello World")',
-        'write_file("/path/to/data.json", JSON.stringify(data))',
+        'Save processed results to a new report file',
+        'Create a backup of important data',
       ],
       category: 'file',
     });
 
     this.registerAction({
       name: 'list_files',
-      description: 'List files in a directory',
+      displayName: 'Browse Folder Contents',
+      description: 'See what files and folders are inside a specific directory',
       parameters: [
-        { type: 'string', description: 'Directory path to list', required: true },
-        { type: 'string', description: 'File pattern filter (optional)', required: false },
+        { type: 'string', description: 'Path to the folder you want to explore', required: true },
+        { type: 'string', description: 'Filter for specific file types (e.g., *.pdf, *.csv)', required: false },
       ],
       examples: [
-        'list_files("/path/to/directory")',
-        'list_files("/path/to/directory", "*.txt")',
+        'Find all spreadsheet files in the reports folder',
+        'Check what documents are in the downloads directory',
       ],
       category: 'file',
     });
@@ -117,14 +122,15 @@ export class ActionsService {
     // Web Actions
     this.registerAction({
       name: 'web_scrape',
-      description: 'Scrape content from a web page',
+      displayName: 'Extract Web Data',
+      description: 'Automatically collect information from websites and web pages',
       parameters: [
-        { type: 'string', description: 'URL to scrape', required: true },
-        { type: 'string', description: 'CSS selector for specific content (optional)', required: false },
+        { type: 'string', description: 'Website address to extract data from', required: true },
+        { type: 'string', description: 'Specific part of the page to focus on (CSS selector)', required: false },
       ],
       examples: [
-        'web_scrape("https://example.com")',
-        'web_scrape("https://example.com", ".content")',
+        'Extract product prices from an e-commerce site',
+        'Get news headlines from a news website',
       ],
       category: 'web',
     });
@@ -132,14 +138,15 @@ export class ActionsService {
     // System Actions
     this.registerAction({
       name: 'execute_command',
-      description: 'Execute a system command',
+      displayName: 'Run System Command',
+      description: 'Execute terminal commands, scripts, or system operations',
       parameters: [
-        { type: 'string', description: 'Command to execute', required: true },
-        { type: 'string', description: 'Working directory (optional)', required: false },
+        { type: 'string', description: 'The command or script you want to run', required: true },
+        { type: 'string', description: 'Folder location where the command should run', required: false },
       ],
       examples: [
-        'execute_command("ls -la")',
-        'execute_command("npm install", "/path/to/project")',
+        'Run a backup script automatically',
+        'Install software packages or dependencies',
       ],
       category: 'system',
     });
@@ -147,14 +154,15 @@ export class ActionsService {
     // Data Actions
     this.registerAction({
       name: 'query_database',
-      description: 'Query the workspace database',
+      displayName: 'Search Database',
+      description: 'Find, filter, and retrieve information from your workspace database',
       parameters: [
-        { type: 'string', description: 'SQL query to execute', required: true },
-        { type: 'object', description: 'Query parameters (optional)', required: false },
+        { type: 'string', description: 'Database search query (SQL format)', required: true },
+        { type: 'object', description: 'Search filters and parameters', required: false },
       ],
       examples: [
-        'query_database("SELECT * FROM users WHERE workspace_id = ?", [workspaceId])',
-        'query_database("SELECT COUNT(*) as count FROM agents")',
+        'Find all active users in the current workspace',
+        'Count how many tasks were completed this month',
       ],
       category: 'data',
     });
@@ -162,32 +170,34 @@ export class ActionsService {
     // Communication Actions
     this.registerAction({
       name: 'send_email',
-      description: 'Send an email',
+      displayName: 'Send Email Message',
+      description: 'Send automated email notifications, reports, or alerts to users',
       parameters: [
-        { type: 'string', description: 'Recipient email address', required: true },
-        { type: 'string', description: 'Email subject', required: true },
-        { type: 'string', description: 'Email body', required: true },
-        { type: 'string', description: 'Email format (text/html)', required: false },
+        { type: 'string', description: 'Email address of the person to send to', required: true },
+        { type: 'string', description: 'Email subject line', required: true },
+        { type: 'string', description: 'The message content to send', required: true },
+        { type: 'string', description: 'Format: "text" for plain text or "html" for rich formatting', required: false },
       ],
       examples: [
-        'send_email("user@example.com", "Test Subject", "Hello World")',
-        'send_email("user@example.com", "Report", "<h1>Report</h1>", "html")',
+        'Send daily reports to team members',
+        'Alert administrators when issues occur',
       ],
       category: 'communication',
     });
 
     this.registerAction({
       name: 'create_notification',
-      description: 'Create a notification in the workspace',
+      displayName: 'Send In-App Alert',
+      description: 'Create notifications that appear inside the workspace for users to see',
       parameters: [
-        { type: 'string', description: 'Notification title', required: true },
-        { type: 'string', description: 'Notification message', required: true },
-        { type: 'string', description: 'Notification type (info/warning/error/success)', required: false },
-        { type: 'array', description: 'User IDs to notify (optional)', required: false },
+        { type: 'string', description: 'Short title for the notification', required: true },
+        { type: 'string', description: 'Detailed message to show users', required: true },
+        { type: 'string', description: 'Type: info, warning, error, or success', required: false },
+        { type: 'array', description: 'Specific users to notify (leave empty for everyone)', required: false },
       ],
       examples: [
-        'create_notification("Task Complete", "The analysis is finished")',
-        'create_notification("Error", "Failed to process data", "error", ["user1", "user2"])',
+        'Notify team when automated tasks finish',
+        'Alert users about important system updates',
       ],
       category: 'communication',
     });
@@ -628,7 +638,21 @@ export class ActionsService {
   }
 
   async createWorkflow(createWorkflowDto: any, userId: string) {
-    const { name, description, steps, triggers, isActive } = createWorkflowDto;
+    const { name, description, steps, triggers, isActive, nodes, edges } = createWorkflowDto;
+    
+    // Determine if this is a visual workflow
+    const isVisualWorkflow = nodes && edges;
+    const workflowType = isVisualWorkflow ? 'visual' : 'sequential';
+    
+       // For visual workflows, store the visual data and convert to steps
+   let workflowSteps = steps || [];
+   let visualData: any = null;
+   
+   if (isVisualWorkflow) {
+     visualData = { nodes, edges };
+     // Convert visual workflow to sequential steps for execution
+     workflowSteps = this.convertVisualToSteps(nodes, edges);
+   }
 
     const workflow = await this.prisma.workflow.create({
       data: {
@@ -636,10 +660,12 @@ export class ActionsService {
         description,
         triggers: triggers || ['manual'],
         isActive: isActive !== undefined ? isActive : true,
+               workflowType,
+       visualData: visualData || undefined,
         createdBy: userId,
         executionCount: 0,
         steps: {
-          create: steps.map((step: any, index: number) => ({
+          create: workflowSteps.map((step: any, index: number) => ({
             actionName: step.actionName,
             parameters: step.parameters || {},
             condition: step.condition,
@@ -931,5 +957,39 @@ export class ActionsService {
     } catch (error) {
       return true; // Default to true on error
     }
+  }
+
+  // Helper to convert visual workflow nodes/edges to sequential steps
+  private convertVisualToSteps(nodes: any[], edges: any[]): any[] {
+    // Filter out trigger nodes - they don't become workflow steps
+    const actionNodes = nodes.filter(node => node.type === 'action');
+    
+    // Build dependency map from edges
+    const dependencies = new Map<string, string[]>();
+    edges.forEach(edge => {
+      if (!dependencies.has(edge.target)) {
+        dependencies.set(edge.target, []);
+      }
+      dependencies.get(edge.target)?.push(edge.source);
+    });
+    
+    // Convert action nodes to workflow steps
+    const steps = actionNodes.map((node, index) => ({
+      actionName: node.data.actionName,
+      parameters: node.data.parameters || {},
+      condition: node.data.condition || null,
+      dependsOn: dependencies.get(node.id) || [],
+      position: index,
+    }));
+    
+    // Sort steps by dependencies (topological sort)
+    return this.topologicalSort(steps, dependencies);
+  }
+ 
+  // Helper to sort workflow steps by dependencies
+  private topologicalSort(steps: any[], dependencies: Map<string, string[]>): any[] {
+    // For now, return steps in order. This can be enhanced with proper topological sorting
+    // if complex dependency graphs need to be supported
+    return steps;
   }
 } 

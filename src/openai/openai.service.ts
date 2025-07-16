@@ -18,13 +18,13 @@ export class OpenaiService {
 - Purpose: ${purpose}
 Return a JSON object with keys: systemPrompt, capabilities (array), roleAssumptions (array).`;
     const completion = await this.openai.chat.completions.create({
-      model: 'gpt-4-1106-preview',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: 'You are a helpful assistant.' },
         { role: 'user', content: prompt },
       ],
       temperature: 0.7,
-      max_tokens: 512,
+      max_tokens: 2048,
     });
     // Try to parse the first code block or JSON in the response
     const content = completion.choices[0]?.message?.content || '';
@@ -60,7 +60,7 @@ Return a JSON object with keys: systemPrompt, capabilities (array), roleAssumpti
     const completion = await this.openai.chat.completions.create({
       model: params.model,
       messages: params.messages,
-      max_tokens: params.max_tokens,
+      max_tokens: params.max_tokens ?? 4096,
       temperature: params.temperature,
     });
     return completion.choices[0]?.message?.content || '';

@@ -6,6 +6,8 @@ import { UpdateAgentDto, UpdateAgentKnowledgeAccessDto } from './dto/update-agen
 import { ExecuteAgentDto } from './dto/execute-agent.dto';
 import { SearchMemoryDto } from './dto/search-memory.dto';
 import { CloneAgentDto } from './dto/clone-agent.dto';
+import { CreateAgentTaskDto, UpdateAgentTaskDto, QueryAgentTasksDto } from './dto';
+import { AnalyzeTaskDto } from './dto/analyze-task.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { Response } from 'express';
@@ -392,5 +394,214 @@ export class AgentsController {
       console.error('[Download] S3 error:', err);
       res.status(404).json({ error: 'File not found in S3', details: err?.message || err });
     }
+  }
+
+  // Agent Task Management Endpoints
+  @ApiOperation({ summary: 'Create a new task for an agent' })
+  @ApiParam({ name: 'id' })
+  @ApiBody({ type: CreateAgentTaskDto })
+  @ApiResponse({ status: 201, description: 'Task created successfully' })
+  @Post(':id/tasks')
+  async createAgentTask(
+    @Param('id') agentId: string,
+    @Body() createTaskDto: CreateAgentTaskDto,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    // Override agentId from path parameter
+    createTaskDto.agentId = agentId;
+    return this.agentsService.createAgentTask(createTaskDto, userId);
+  }
+
+  @ApiOperation({ summary: 'Analyze a task instruction before execution' })
+  @ApiParam({ name: 'id' })
+  @ApiBody({ type: AnalyzeTaskDto })
+  @ApiResponse({ status: 200, description: 'Task analysis completed' })
+  @Post(':id/tasks/analyze')
+  async analyzeTask(
+    @Param('id') agentId: string,
+    @Body() analyzeDto: AnalyzeTaskDto,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    return this.agentsService.analyzeTask(agentId, analyzeDto.instruction, userId);
+  }
+
+  @ApiOperation({ summary: 'Get tasks for an agent' })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, description: 'List of agent tasks' })
+  @Get(':id/tasks')
+  async getAgentTasks(
+    @Param('id') agentId: string,
+    @Query() query: QueryAgentTasksDto,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    // Override agentId from path parameter
+    query.agentId = agentId;
+    return this.agentsService.getAgentTasks(query, userId);
+  }
+
+  @ApiOperation({ summary: 'Get all tasks (with optional filtering)' })
+  @ApiResponse({ status: 200, description: 'List of all tasks' })
+  @Get('tasks')
+  async getAllTasks(
+    @Query() query: QueryAgentTasksDto,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    return this.agentsService.getAgentTasks(query, userId);
+  }
+
+  @ApiOperation({ summary: 'Get task statistics' })
+  @ApiParam({ name: 'agentId', required: false })
+  @ApiResponse({ status: 200, description: 'Task statistics' })
+  @Get('tasks/stats')
+  async getTaskStats(
+    @Query('agentId') agentId?: string,
+    @Req() req?: any,
+  ) {
+    const userId = req?.user?.userId;
+    return this.agentsService.getAgentTaskStats(agentId, userId);
+  }
+
+  @ApiOperation({ summary: 'Get a specific task by ID' })
+  @ApiParam({ name: 'taskId' })
+  @ApiResponse({ status: 200, description: 'Task details' })
+  @Get('tasks/:taskId')
+  async getAgentTask(
+    @Param('taskId') taskId: string,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    return this.agentsService.getAgentTask(taskId, userId);
+  }
+
+  @ApiOperation({ summary: 'Update a task' })
+  @ApiParam({ name: 'taskId' })
+  @ApiBody({ type: UpdateAgentTaskDto })
+  @ApiResponse({ status: 200, description: 'Task updated successfully' })
+  @Patch('tasks/:taskId')
+  async updateAgentTask(
+    @Param('taskId') taskId: string,
+    @Body() updateTaskDto: UpdateAgentTaskDto,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    return this.agentsService.updateAgentTask(taskId, updateTaskDto, userId);
+  }
+
+  @ApiOperation({ summary: 'Delete a task' })
+  @ApiParam({ name: 'taskId' })
+  @ApiResponse({ status: 200, description: 'Task deleted successfully' })
+  @Delete('tasks/:taskId')
+  async deleteAgentTask(
+    @Param('taskId') taskId: string,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    return this.agentsService.deleteAgentTask(taskId, userId);
+  }
+
+  @ApiOperation({ summary: 'Retry a failed task' })
+  @ApiParam({ name: 'taskId' })
+  @ApiResponse({ status: 200, description: 'Task queued for retry' })
+  @Post('tasks/:taskId/retry')
+  async retryAgentTask(
+    @Param('taskId') taskId: string,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    // This will be handled by the task execution service
+    return this.agentsService.retryAgentTask(taskId, userId);
+  }
+
+  @ApiOperation({ summary: 'Cancel a task' })
+  @ApiParam({ name: 'taskId' })
+  @ApiResponse({ status: 200, description: 'Task cancelled successfully' })
+  @Post('tasks/:taskId/cancel')
+  async cancelAgentTask(
+    @Param('taskId') taskId: string,
+    @Req() req: any,
+  ) {
+    const userId = req.user.userId;
+    // This will be handled by the task execution service
+    return this.agentsService.cancelAgentTask(taskId, userId);
+  }
+
+  // Agent Workflows
+  @ApiOperation({ summary: 'Get workflows for a specific agent' })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, description: 'List of agent workflows' })
+  @Get(':id/workflows')
+  async getAgentWorkflows(
+    @Param('id') agentId: string,
+    @Request() req: any,
+  ) {
+    return this.agentsService.getAgentWorkflows(agentId, req.user.id);
+  }
+
+  @ApiOperation({ summary: 'Create a workflow for a specific agent' })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 201, description: 'Workflow created for agent' })
+  @Post(':id/workflows')
+  async createAgentWorkflow(
+    @Param('id') agentId: string,
+    @Body() dto: any,
+    @Request() req: any,
+  ) {
+    return this.agentsService.createAgentWorkflow(agentId, dto, req.user.id);
+  }
+
+  @ApiOperation({ summary: 'Analyze workflow description for agent' })
+  @ApiParam({ name: 'id' })
+  @ApiResponse({ status: 200, description: 'Workflow analysis result' })
+  @Post(':id/workflows/analyze')
+  async analyzeWorkflow(
+    @Param('id') agentId: string,
+    @Body() dto: { description: string },
+    @Request() req: any,
+  ) {
+    return this.agentsService.analyzeWorkflow(agentId, dto.description, req.user.id);
+  }
+
+  @ApiOperation({ summary: 'Update an agent workflow' })
+  @ApiParam({ name: 'id' })
+  @ApiParam({ name: 'workflowId' })
+  @ApiResponse({ status: 200, description: 'Workflow updated' })
+  @Patch(':id/workflows/:workflowId')
+  async updateAgentWorkflow(
+    @Param('id') agentId: string,
+    @Param('workflowId') workflowId: string,
+    @Body() dto: any,
+    @Request() req: any,
+  ) {
+    return this.agentsService.updateAgentWorkflow(agentId, workflowId, dto, req.user.id);
+  }
+
+  @ApiOperation({ summary: 'Delete an agent workflow' })
+  @ApiParam({ name: 'id' })
+  @ApiParam({ name: 'workflowId' })
+  @ApiResponse({ status: 200, description: 'Workflow deleted' })
+  @Delete(':id/workflows/:workflowId')
+  async deleteAgentWorkflow(
+    @Param('id') agentId: string,
+    @Param('workflowId') workflowId: string,
+    @Request() req: any,
+  ) {
+    return this.agentsService.deleteAgentWorkflow(agentId, workflowId, req.user.id);
+  }
+
+  @ApiOperation({ summary: 'Execute an agent workflow' })
+  @ApiParam({ name: 'id' })
+  @ApiParam({ name: 'workflowId' })
+  @ApiResponse({ status: 200, description: 'Workflow executed' })
+  @Post(':id/workflows/:workflowId/execute')
+  async executeAgentWorkflow(
+    @Param('id') agentId: string,
+    @Param('workflowId') workflowId: string,
+    @Request() req: any,
+  ) {
+    return this.agentsService.executeAgentWorkflow(agentId, workflowId, req.user.id);
   }
 }

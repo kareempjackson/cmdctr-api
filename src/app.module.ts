@@ -20,6 +20,8 @@ import { BillingModule } from './billing/billing.module';
 import { UsageModule } from './usage/usage.module';
 import { ActionsModule } from './actions/actions.module';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ChatModule } from './chat/chat.module';
+import { FeedbackModule } from './feedback/feedback.module';
 
 @Module({
   imports: [
@@ -41,7 +43,9 @@ import { ScheduleModule } from '@nestjs/schedule';
     FilesModule,
     BillingModule,
     UsageModule,
-    ActionsModule
+    ActionsModule,
+    ChatModule,
+    FeedbackModule
   ],
   controllers: [AppController],
   providers: [AppService],

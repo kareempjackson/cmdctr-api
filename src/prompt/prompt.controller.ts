@@ -2,6 +2,7 @@ import { Controller, Post, Body, UseGuards, Request, ForbiddenException } from '
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PromptService, InterpretPromptResponse } from './prompt.service';
 import { UsageService } from '../usage/usage.service';
+import { ActivityService } from '../activity/activity.service';
 
 export class InterpretPromptDto {
   prompt: string;
@@ -14,6 +15,7 @@ export class PromptController {
   constructor(
     private readonly promptService: PromptService,
     private readonly usageService: UsageService,
+    private readonly activityService: ActivityService,
   ) {}
 
   @Post('interpret')
@@ -28,6 +30,24 @@ export class PromptController {
     
     // Interpret prompt
     const result = await this.promptService.interpretPrompt(dto.prompt, dto.workspaceId, userId);
+    
+    // Log AI prompt activity
+    await this.activityService.logActivity({
+      userId,
+      workspaceId: dto.workspaceId,
+      category: 'ai-prompt',
+      action: 'interpret',
+      resource: dto.workspaceId,
+      description: `AI prompt interpreted: "${dto.prompt.substring(0, 100)}${dto.prompt.length > 100 ? '...' : ''}"`,
+      metadata: {
+        prompt: dto.prompt,
+        intent: result.intent,
+        blocksGenerated: result.blocks.length,
+        blockTypes: result.blocks.map(block => block.type),
+        workspaceId: dto.workspaceId,
+      },
+      status: 'success',
+    });
     
     // Increment usage after successful call
     // Estimate tokens used based on prompt length and result content
